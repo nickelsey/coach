@@ -1,0 +1,70 @@
+# XcodeGen spec. Regenerate the Xcode project after editing:
+#   cd ios && xcodegen
+name: Coach
+options:
+  bundleIdPrefix: dev.coach
+  deploymentTarget:
+    iOS: "27.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: "" # set your team ID to run on a device
+
+packages:
+  GRDB:
+    url: https://github.com/groue/GRDB.swift
+    from: 7.0.0
+
+targets:
+  Coach:
+    type: application
+    platform: iOS
+    sources:
+      - path: Coach
+    dependencies:
+      - package: GRDB
+    info:
+      path: Coach/Info.plist
+      properties:
+        CFBundleDisplayName: Coach
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIAppFonts:
+          - ChakraPetch-Medium.ttf
+          - ChakraPetch-SemiBold.ttf
+          - ChakraPetch-Bold.ttf
+          - ShareTechMono-Regular.ttf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coach.Coach
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+
+  CoachTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: CoachTests
+    dependencies:
+      - target: Coach
+      - package: GRDB
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.coach.CoachTests
+
+schemes:
+  Coach:
+    build:
+      targets:
+        Coach: all
+        CoachTests: [test]
+    test:
+      targets:
+        - CoachTests
