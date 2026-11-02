@@ -1,0 +1,51 @@
+# Coach backend. Nothing here publishes a port on the LAN: the only way in is
+# the tailnet, through the `ts` container (hostname "coach").
+name: coach
+
+services:
+  ts:
+    image: tailscale/tailscale:stable
+    hostname: coach
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+    volumes:
+      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+    restart: unless-stopped
+
+  db:
+    image: postgres:17
+    container_name: coach-db
+    environment:
+      POSTGRES_DB: coach
+      POSTGRES_USER: coach
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coach -d coach"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    # On the NAS this image is loaded from build-image.sh (it can't build
+    # there). Elsewhere, compose builds it if it's missing.
+    image: coach-api:latest
+    build: ../server
+    # Shares the ts container's network, so tailscale serve reaches it on
+    # 127.0.0.1:8080 and it reaches Postgres as "db".
+    network_mode: service:ts
+    environment:
+      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable
+      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}
+      LISTEN_ADDR: 127.0.0.1:8080
+    depends_on:
+      ts:
+        condition: service_started
+      db:
+        condition: service_healthy
+    restart: unless-stopped
