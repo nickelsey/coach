@@ -1,0 +1,15 @@
+.DS_Store
+# Env files hold secrets (deploy/.env has the DB password, API token, TS key)
+.env
+.env.*
+!.env.example
+deploy/data/
+
+# Xcode
+xcuserdata/
+DerivedData/
+build/
+deploy/dist/
+
+# Secrets
+*.key
