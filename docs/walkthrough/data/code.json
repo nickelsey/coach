@@ -1,0 +1,2413 @@
+{
+ "groups": [
+  {
+   "id": "server",
+   "title": "Server \u00b7 Go API",
+   "blurb": "The sync API. Start at main.go, then follow a request: api.go \u2192 sync.go \u2192 fast.go \u2192 SQL.",
+   "files": [
+    "server/cmd/api/main.go",
+    "server/internal/api/api.go",
+    "server/internal/store/sync.go",
+    "server/internal/store/fast.go",
+    "server/internal/db/db.go",
+    "server/internal/db/migrations/0001_init.sql",
+    "server/internal/api/api_test.go",
+    "server/internal/store/store_test.go",
+    "server/Dockerfile",
+    "server/go.mod"
+   ]
+  },
+  {
+   "id": "deploy",
+   "title": "Deploy \u00b7 Synology",
+   "blurb": "How the server runs: Compose topology, the Tailscale front door, image builds and backups.",
+   "files": [
+    "deploy/compose.yaml",
+    "deploy/serve.json",
+    "deploy/build-image.sh",
+    "deploy/backup.sh",
+    "deploy/.env.example",
+    "deploy/README.md"
+   ]
+  },
+  {
+   "id": "ios-data",
+   "title": "iOS \u00b7 data and sync",
+   "blurb": "Everything below the UI. Read these before the views.",
+   "files": [
+    "ios/Coach/Data/AppDatabase.swift",
+    "ios/Coach/Data/Fast.swift",
+    "ios/Coach/Data/FastRepository.swift",
+    "ios/Coach/Sync/SyncEngine.swift",
+    "ios/Coach/Sync/WireFormat.swift",
+    "ios/Coach/Sync/SyncTransport.swift",
+    "ios/Coach/Sync/ServerConfig.swift"
+   ]
+  },
+  {
+   "id": "ios-app",
+   "title": "iOS \u00b7 app and screens",
+   "blurb": "State, notifications and the views.",
+   "files": [
+    "ios/Coach/App/CoachApp.swift",
+    "ios/Coach/App/AppModel.swift",
+    "ios/Coach/App/FastNotifications.swift",
+    "ios/Coach/App/RootView.swift",
+    "ios/Coach/Features/Today/TodayView.swift",
+    "ios/Coach/Features/Fast/FastView.swift",
+    "ios/Coach/Features/Settings/SettingsView.swift",
+    "ios/Coach/Features/Placeholder/ModulePlaceholder.swift"
+   ]
+  },
+  {
+   "id": "ios-theme",
+   "title": "iOS \u00b7 NEON//OS design system",
+   "blurb": "Reusable visual building blocks. New screens should only need these.",
+   "files": [
+    "ios/Coach/Theme/Theme.swift",
+    "ios/Coach/Theme/Shapes.swift",
+    "ios/Coach/Theme/Components.swift",
+    "ios/Coach/Theme/Format.swift"
+   ]
+  },
+  {
+   "id": "ios-project",
+   "title": "iOS \u00b7 tests and project",
+   "blurb": "Tests and the XcodeGen spec.",
+   "files": [
+    "ios/CoachTests/SyncEngineTests.swift",
+    "ios/CoachTests/FastRepositoryTests.swift",
+    "ios/CoachTests/WireFormatTests.swift",
+    "ios/project.yml",
+    "ios/README.md"
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Project docs",
+   "blurb": "Decisions and the original notes.",
+   "files": [
+    "spec.md",
+    "inital_spec.md"
+   ]
+  }
+ ],
+ "files": [
+  {
+   "path": "server/cmd/api/main.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 98,
+   "note": "Entry point. Reads config from the environment, waits for Postgres, runs migrations, serves HTTP and shuts down cleanly on SIGTERM.",
+   "summary": "Command api serves the Coach sync API.\n\nConfiguration comes from the environment:\n\nDATABASE_URL     Postgres connection string (required)\nCOACH_API_TOKEN  bearer token clients must send, at least 32 chars (required)\nLISTEN_ADDR      address to listen on (default \":8080\")",
+   "symbols": [
+    {
+     "kind": "func",
+     "name": "main",
+     "line": 27,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "run",
+     "line": 35,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "connectWithRetry",
+     "line": 82,
+     "depth": 0,
+     "doc": "connectWithRetry waits for Postgres, which may still be starting when the\ncontainer comes up."
+    }
+   ],
+   "source": "// Command api serves the Coach sync API.\n//\n// Configuration comes from the environment:\n//\n//\tDATABASE_URL     Postgres connection string (required)\n//\tCOACH_API_TOKEN  bearer token clients must send, at least 32 chars (required)\n//\tLISTEN_ADDR      address to listen on (default \":8080\")\npackage main\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"coach/server/internal/api\"\n\t\"coach/server/internal/db\"\n\t\"coach/server/internal/store\"\n\n\t\"github.com/jackc/pgx/v5/pgxpool\"\n)\n\nfunc main() {\n\tlog := slog.New(slog.NewJSONHandler(os.Stdout, nil))\n\tif err := run(log); err != nil {\n\t\tlog.Error(\"fatal\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n}\n\nfunc run(log *slog.Logger) error {\n\tdbURL := os.Getenv(\"DATABASE_URL\")\n\ttoken := os.Getenv(\"COACH_API_TOKEN\")\n\taddr := os.Getenv(\"LISTEN_ADDR\")\n\tif addr == \"\" {\n\t\taddr = \":8080\"\n\t}\n\tif dbURL == \"\" {\n\t\treturn errors.New(\"DATABASE_URL is required\")\n\t}\n\tif len(token) < 32 {\n\t\treturn errors.New(\"COACH_API_TOKEN must be at least 32 characters\")\n\t}\n\n\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\n\tpool, err := connectWithRetry(ctx, dbURL, log)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer pool.Close()\n\tif err := db.Migrate(ctx, pool); err != nil {\n\t\treturn err\n\t}\n\n\tsrv := &http.Server{\n\t\tAddr:              addr,\n\t\tHandler:           api.New(store.New(pool), token, log),\n\t\tReadHeaderTimeout: 10 * time.Second,\n\t}\n\terrc := make(chan error, 1)\n\tgo func() { errc <- srv.ListenAndServe() }()\n\tlog.Info(\"listening\", \"addr\", addr)\n\n\tselect {\n\tcase err := <-errc:\n\t\treturn err\n\tcase <-ctx.Done():\n\t}\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\treturn srv.Shutdown(shutdownCtx)\n}\n\n// connectWithRetry waits for Postgres, which may still be starting when the\n// container comes up.\nfunc connectWithRetry(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, error) {\n\tvar lastErr error\n\tfor attempt := 1; attempt <= 30; attempt++ {\n\t\tpool, err := db.Connect(ctx, url)\n\t\tif err == nil {\n\t\t\treturn pool, nil\n\t\t}\n\t\tlastErr = err\n\t\tlog.Warn(\"database not ready\", \"attempt\", attempt, \"err\", err)\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn nil, ctx.Err()\n\t\tcase <-time.After(2 * time.Second):\n\t\t}\n\t}\n\treturn nil, lastErr\n}\n"
+  },
+  {
+   "path": "server/internal/api/api.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 122,
+   "note": "The HTTP layer: routes, the bearer-token check, JSON decoding that rejects unknown fields, and mapping validation errors to 400.",
+   "summary": "Package api is the HTTP layer: auth, request decoding and routing.",
+   "symbols": [
+    {
+     "kind": "interface",
+     "name": "Syncer",
+     "line": 24,
+     "depth": 0,
+     "doc": "Syncer is the storage the handlers need; *store.Store implements it."
+    },
+    {
+     "kind": "func",
+     "name": "New",
+     "line": 30,
+     "depth": 0,
+     "doc": "New returns the API handler. Every /v1 route requires the bearer token."
+    },
+    {
+     "kind": "struct",
+     "name": "handlers",
+     "line": 44,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(*handlers) push",
+     "line": 49,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(*handlers) pull",
+     "line": 65,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(*handlers) fail",
+     "line": 84,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "requireToken",
+     "line": 94,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "intParam",
+     "line": 106,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "writeJSON",
+     "line": 114,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "writeError",
+     "line": 120,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "// Package api is the HTTP layer: auth, request decoding and routing.\npackage api\n\nimport (\n\t\"context\"\n\t\"crypto/subtle\"\n\t\"encoding/json\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"strconv\"\n\t\"strings\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst (\n\tmaxBodyBytes     = 5 << 20\n\tdefaultPullLimit = 500\n\tmaxPullLimit     = 2000\n)\n\n// Syncer is the storage the handlers need; *store.Store implements it.\ntype Syncer interface {\n\tPush(ctx context.Context, c store.Changes) (store.PushResult, error)\n\tPull(ctx context.Context, since int64, limit int) (store.PullResult, error)\n}\n\n// New returns the API handler. Every /v1 route requires the bearer token.\nfunc New(s Syncer, token string, log *slog.Logger) http.Handler {\n\th := &handlers{s: s, log: log}\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /healthz\", func(w http.ResponseWriter, r *http.Request) {\n\t\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"ok\"})\n\t})\n\n\tv1 := http.NewServeMux()\n\tv1.HandleFunc(\"POST /v1/sync/push\", h.push)\n\tv1.HandleFunc(\"GET /v1/sync/pull\", h.pull)\n\tmux.Handle(\"/v1/\", requireToken(token, v1))\n\treturn mux\n}\n\ntype handlers struct {\n\ts   Syncer\n\tlog *slog.Logger\n}\n\nfunc (h *handlers) push(w http.ResponseWriter, r *http.Request) {\n\tvar c store.Changes\n\tdec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))\n\tdec.DisallowUnknownFields()\n\tif err := dec.Decode(&c); err != nil {\n\t\twriteError(w, http.StatusBadRequest, \"invalid JSON: \"+err.Error())\n\t\treturn\n\t}\n\tres, err := h.s.Push(r.Context(), c)\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) pull(w http.ResponseWriter, r *http.Request) {\n\tsince, err := intParam(r, \"since\", 0)\n\tif err != nil || since < 0 {\n\t\twriteError(w, http.StatusBadRequest, \"since must be a non-negative integer\")\n\t\treturn\n\t}\n\tlimit, err := intParam(r, \"limit\", defaultPullLimit)\n\tif err != nil || limit < 1 || limit > maxPullLimit {\n\t\twriteError(w, http.StatusBadRequest, \"limit must be between 1 and 2000\")\n\t\treturn\n\t}\n\tres, err := h.s.Pull(r.Context(), since, int(limit))\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) fail(w http.ResponseWriter, err error) {\n\tvar ve store.ValidationError\n\tif errors.As(err, &ve) {\n\t\twriteError(w, http.StatusBadRequest, ve.Error())\n\t\treturn\n\t}\n\th.log.Error(\"request failed\", \"err\", err)\n\twriteError(w, http.StatusInternalServerError, \"internal error\")\n}\n\nfunc requireToken(token string, next http.Handler) http.Handler {\n\twant := []byte(\"Bearer \" + token)\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tgot := []byte(r.Header.Get(\"Authorization\"))\n\t\tif subtle.ConstantTimeCompare(got, want) != 1 {\n\t\t\twriteError(w, http.StatusUnauthorized, \"missing or invalid token\")\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\nfunc intParam(r *http.Request, name string, def int64) (int64, error) {\n\tv := strings.TrimSpace(r.URL.Query().Get(name))\n\tif v == \"\" {\n\t\treturn def, nil\n\t}\n\treturn strconv.ParseInt(v, 10, 64)\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tjson.NewEncoder(w).Encode(v)\n}\n\nfunc writeError(w http.ResponseWriter, status int, msg string) {\n\twriteJSON(w, status, map[string]string{\"error\": msg})\n}\n"
+  },
+  {
+   "path": "server/internal/store/sync.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 154,
+   "note": "The heart of sync. Push validates a batch and upserts it under an advisory lock; Pull merges tables by server_seq and pages with has_more.",
+   "summary": "Package store implements the sync protocol on top of Postgres.\n\nClients push batches of changed records and pull everything with a\nserver_seq above their cursor. Each entity type gets its own table and its\nown field in Changes; adding a type means adding a migration, a struct with\nupsert/pull functions, and wiring it into Push and Pull below.",
+   "symbols": [
+    {
+     "kind": "var",
+     "name": "validOrigins",
+     "line": 23,
+     "depth": 0,
+     "doc": "Origins a record can come from."
+    },
+    {
+     "kind": "var",
+     "name": "uuidRe",
+     "line": 25,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "Changes",
+     "line": 28,
+     "depth": 0,
+     "doc": "Changes is a set of records grouped by entity type."
+    },
+    {
+     "kind": "struct",
+     "name": "PushResult",
+     "line": 34,
+     "depth": 0,
+     "doc": "PushResult says which records were written and which were skipped because\nthe server already had an equal or newer version."
+    },
+    {
+     "kind": "struct",
+     "name": "PullResult",
+     "line": 41,
+     "depth": 0,
+     "doc": "PullResult is one page of changes. Cursor is the value to send as \"since\"\non the next pull."
+    },
+    {
+     "kind": "struct",
+     "name": "ValidationError",
+     "line": 48,
+     "depth": 0,
+     "doc": "ValidationError marks a request the client must fix; the API maps it to 400."
+    },
+    {
+     "kind": "method",
+     "name": "(ValidationError) Error",
+     "line": 50,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "interface",
+     "name": "querier",
+     "line": 52,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "Store",
+     "line": 57,
+     "depth": 0,
+     "doc": "Store is the Postgres-backed sync store."
+    },
+    {
+     "kind": "func",
+     "name": "New",
+     "line": 61,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(Changes) Validate",
+     "line": 64,
+     "depth": 0,
+     "doc": "Validate checks every record in the batch before anything is written."
+    },
+    {
+     "kind": "method",
+     "name": "(*Store) Push",
+     "line": 74,
+     "depth": 0,
+     "doc": "Push writes a batch atomically."
+    },
+    {
+     "kind": "method",
+     "name": "(*Store) Pull",
+     "line": 111,
+     "depth": 0,
+     "doc": "Pull returns up to limit records changed after since, across all types,\nin server_seq order."
+    },
+    {
+     "kind": "func",
+     "name": "validateMeta",
+     "line": 140,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "// Package store implements the sync protocol on top of Postgres.\n//\n// Clients push batches of changed records and pull everything with a\n// server_seq above their cursor. Each entity type gets its own table and its\n// own field in Changes; adding a type means adding a migration, a struct with\n// upsert/pull functions, and wiring it into Push and Pull below.\npackage store\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"fmt\"\n\t\"regexp\"\n\t\"sort\"\n\t\"time\"\n\n\t\"github.com/jackc/pgx/v5\"\n\t\"github.com/jackc/pgx/v5/pgconn\"\n\t\"github.com/jackc/pgx/v5/pgxpool\"\n)\n\n// Origins a record can come from.\nvar validOrigins = map[string]bool{\"phone\": true, \"watch\": true, \"web\": true, \"mcp\": true}\n\nvar uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)\n\n// Changes is a set of records grouped by entity type.\ntype Changes struct {\n\tFasts []Fast `json:\"fasts\"`\n}\n\n// PushResult says which records were written and which were skipped because\n// the server already had an equal or newer version.\ntype PushResult struct {\n\tApplied []string `json:\"applied\"`\n\tStale   []string `json:\"stale\"`\n}\n\n// PullResult is one page of changes. Cursor is the value to send as \"since\"\n// on the next pull.\ntype PullResult struct {\n\tChanges Changes `json:\"changes\"`\n\tCursor  int64   `json:\"cursor\"`\n\tHasMore bool    `json:\"has_more\"`\n}\n\n// ValidationError marks a request the client must fix; the API maps it to 400.\ntype ValidationError struct{ msg string }\n\nfunc (e ValidationError) Error() string { return e.msg }\n\ntype querier interface {\n\tQuery(ctx context.Context, sql string, args ...any) (pgx.Rows, error)\n}\n\n// Store is the Postgres-backed sync store.\ntype Store struct {\n\tpool *pgxpool.Pool\n}\n\nfunc New(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }\n\n// Validate checks every record in the batch before anything is written.\nfunc (c Changes) Validate() error {\n\tfor i, f := range c.Fasts {\n\t\tif err := f.Validate(); err != nil {\n\t\t\treturn ValidationError{fmt.Sprintf(\"fasts[%d]: %v\", i, err)}\n\t\t}\n\t}\n\treturn nil\n}\n\n// Push writes a batch atomically.\nfunc (s *Store) Push(ctx context.Context, c Changes) (PushResult, error) {\n\tif err := c.Validate(); err != nil {\n\t\treturn PushResult{}, err\n\t}\n\tres := PushResult{Applied: []string{}, Stale: []string{}}\n\n\terr := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {\n\t\t// Serialize writers so server_seq values become visible in order;\n\t\t// otherwise a puller could advance past a seq still being committed.\n\t\tif _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(1)`); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tfor _, f := range c.Fasts {\n\t\t\tok, err := upsertFast(ctx, tx, f)\n\t\t\tif err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\tif ok {\n\t\t\t\tres.Applied = append(res.Applied, f.ID)\n\t\t\t} else {\n\t\t\t\tres.Stale = append(res.Stale, f.ID)\n\t\t\t}\n\t\t}\n\t\treturn nil\n\t})\n\tif err != nil {\n\t\tvar pgErr *pgconn.PgError\n\t\tif errors.As(err, &pgErr) && pgErr.Code == \"23514\" { // check_violation\n\t\t\treturn PushResult{}, ValidationError{pgErr.Message}\n\t\t}\n\t\treturn PushResult{}, err\n\t}\n\treturn res, nil\n}\n\n// Pull returns up to limit records changed after since, across all types,\n// in server_seq order.\nfunc (s *Store) Pull(ctx context.Context, since int64, limit int) (PullResult, error) {\n\t// Fetch limit+1 from each table so we can tell whether more remain.\n\tfasts, err := pullFasts(ctx, s.pool, since, limit+1)\n\tif err != nil {\n\t\treturn PullResult{}, err\n\t}\n\n\ttype seqer interface{ seq() int64 }\n\tvar all []seqer\n\tfor _, f := range fasts {\n\t\tall = append(all, f)\n\t}\n\tsort.Slice(all, func(i, j int) bool { return all[i].seq() < all[j].seq() })\n\n\tres := PullResult{Changes: Changes{Fasts: []Fast{}}, Cursor: since}\n\tif len(all) > limit {\n\t\tall = all[:limit]\n\t\tres.HasMore = true\n\t}\n\tfor _, r := range all {\n\t\tswitch v := r.(type) {\n\t\tcase Fast:\n\t\t\tres.Changes.Fasts = append(res.Changes.Fasts, v)\n\t\t}\n\t\tres.Cursor = r.seq()\n\t}\n\treturn res, nil\n}\n\nfunc validateMeta(id string, created, updated time.Time, origin string) error {\n\tif !uuidRe.MatchString(id) {\n\t\treturn errors.New(\"id must be a UUID\")\n\t}\n\tif created.IsZero() || updated.IsZero() {\n\t\treturn errors.New(\"created_at and updated_at are required\")\n\t}\n\tif updated.Before(created) {\n\t\treturn errors.New(\"updated_at is before created_at\")\n\t}\n\tif !validOrigins[origin] {\n\t\treturn fmt.Errorf(\"unknown origin %q\", origin)\n\t}\n\treturn nil\n}\n"
+  },
+  {
+   "path": "server/internal/store/fast.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 87,
+   "note": "The fasts entity: struct, validation, and the last-writer-wins upsert (note the WHERE clause on updated_at).",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "Fast",
+     "line": 13,
+     "depth": 0,
+     "doc": "Fast is one fasting period. EndedAt is nil while the fast is running."
+    },
+    {
+     "kind": "method",
+     "name": "(Fast) seq",
+     "line": 26,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(Fast) Validate",
+     "line": 29,
+     "depth": 0,
+     "doc": "Validate checks the fields a client is responsible for."
+    },
+    {
+     "kind": "func",
+     "name": "upsertFast",
+     "line": 47,
+     "depth": 0,
+     "doc": "upsertFast writes f unless the stored row is as new or newer\n(last-writer-wins on updated_at). It reports whether the row was written."
+    },
+    {
+     "kind": "func",
+     "name": "pullFasts",
+     "line": 70,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "package store\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"fmt\"\n\t\"time\"\n\n\t\"github.com/jackc/pgx/v5\"\n)\n\n// Fast is one fasting period. EndedAt is nil while the fast is running.\ntype Fast struct {\n\tID          string     `json:\"id\"`\n\tStartedAt   time.Time  `json:\"started_at\"`\n\tEndedAt     *time.Time `json:\"ended_at\"`\n\tGoalSeconds int        `json:\"goal_seconds\"`\n\tNotes       string     `json:\"notes\"`\n\tCreatedAt   time.Time  `json:\"created_at\"`\n\tUpdatedAt   time.Time  `json:\"updated_at\"`\n\tDeletedAt   *time.Time `json:\"deleted_at\"`\n\tOrigin      string     `json:\"origin\"`\n\tServerSeq   int64      `json:\"server_seq,omitempty\"`\n}\n\nfunc (f Fast) seq() int64 { return f.ServerSeq }\n\n// Validate checks the fields a client is responsible for.\nfunc (f Fast) Validate() error {\n\tif err := validateMeta(f.ID, f.CreatedAt, f.UpdatedAt, f.Origin); err != nil {\n\t\treturn err\n\t}\n\tif f.StartedAt.IsZero() {\n\t\treturn errors.New(\"started_at is required\")\n\t}\n\tif f.EndedAt != nil && f.EndedAt.Before(f.StartedAt) {\n\t\treturn errors.New(\"ended_at is before started_at\")\n\t}\n\tif f.GoalSeconds <= 0 {\n\t\treturn errors.New(\"goal_seconds must be positive\")\n\t}\n\treturn nil\n}\n\n// upsertFast writes f unless the stored row is as new or newer\n// (last-writer-wins on updated_at). It reports whether the row was written.\nfunc upsertFast(ctx context.Context, tx pgx.Tx, f Fast) (bool, error) {\n\ttag, err := tx.Exec(ctx, `\n\t\tINSERT INTO fasts (id, started_at, ended_at, goal_seconds, notes,\n\t\t                   created_at, updated_at, deleted_at, origin)\n\t\tVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)\n\t\tON CONFLICT (id) DO UPDATE SET\n\t\t\tstarted_at   = EXCLUDED.started_at,\n\t\t\tended_at     = EXCLUDED.ended_at,\n\t\t\tgoal_seconds = EXCLUDED.goal_seconds,\n\t\t\tnotes        = EXCLUDED.notes,\n\t\t\tupdated_at   = EXCLUDED.updated_at,\n\t\t\tdeleted_at   = EXCLUDED.deleted_at,\n\t\t\torigin       = EXCLUDED.origin,\n\t\t\tserver_seq   = nextval('sync_seq')\n\t\tWHERE fasts.updated_at < EXCLUDED.updated_at`,\n\t\tf.ID, f.StartedAt, f.EndedAt, f.GoalSeconds, f.Notes,\n\t\tf.CreatedAt, f.UpdatedAt, f.DeletedAt, f.Origin)\n\tif err != nil {\n\t\treturn false, fmt.Errorf(\"upsert fast %s: %w\", f.ID, err)\n\t}\n\treturn tag.RowsAffected() == 1, nil\n}\n\nfunc pullFasts(ctx context.Context, q querier, since int64, limit int) ([]Fast, error) {\n\trows, err := q.Query(ctx, `\n\t\tSELECT id::text, started_at, ended_at, goal_seconds, notes,\n\t\t       created_at, updated_at, deleted_at, origin, server_seq\n\t\tFROM fasts\n\t\tWHERE server_seq > $1\n\t\tORDER BY server_seq\n\t\tLIMIT $2`, since, limit)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"pull fasts: %w\", err)\n\t}\n\treturn pgx.CollectRows(rows, func(r pgx.CollectableRow) (Fast, error) {\n\t\tvar f Fast\n\t\terr := r.Scan(&f.ID, &f.StartedAt, &f.EndedAt, &f.GoalSeconds, &f.Notes,\n\t\t\t&f.CreatedAt, &f.UpdatedAt, &f.DeletedAt, &f.Origin, &f.ServerSeq)\n\t\treturn f, err\n\t})\n}\n"
+  },
+  {
+   "path": "server/internal/db/db.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 100,
+   "note": "Connection pool and the tiny migration runner over embedded SQL files.",
+   "summary": "Package db owns the Postgres connection pool and schema migrations.",
+   "symbols": [
+    {
+     "kind": "var",
+     "name": "migrationFS",
+     "line": 16,
+     "depth": 0,
+     "doc": "go:embed migrations/*.sql"
+    },
+    {
+     "kind": "func",
+     "name": "Connect",
+     "line": 19,
+     "depth": 0,
+     "doc": "Connect opens a pool and verifies the database is reachable."
+    },
+    {
+     "kind": "struct",
+     "name": "Migration",
+     "line": 32,
+     "depth": 0,
+     "doc": "Migration is one embedded SQL file, applied in filename order."
+    },
+    {
+     "kind": "func",
+     "name": "Migrations",
+     "line": 38,
+     "depth": 0,
+     "doc": "Migrations returns the embedded migrations sorted by filename."
+    },
+    {
+     "kind": "func",
+     "name": "Migrate",
+     "line": 60,
+     "depth": 0,
+     "doc": "Migrate applies any migrations not yet recorded in schema_migrations.\nEach migration runs in its own transaction."
+    }
+   ],
+   "source": "// Package db owns the Postgres connection pool and schema migrations.\npackage db\n\nimport (\n\t\"context\"\n\t\"embed\"\n\t\"fmt\"\n\t\"io/fs\"\n\t\"sort\"\n\t\"strings\"\n\n\t\"github.com/jackc/pgx/v5/pgxpool\"\n)\n\n//go:embed migrations/*.sql\nvar migrationFS embed.FS\n\n// Connect opens a pool and verifies the database is reachable.\nfunc Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {\n\tpool, err := pgxpool.New(ctx, url)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"open pool: %w\", err)\n\t}\n\tif err := pool.Ping(ctx); err != nil {\n\t\tpool.Close()\n\t\treturn nil, fmt.Errorf(\"ping: %w\", err)\n\t}\n\treturn pool, nil\n}\n\n// Migration is one embedded SQL file, applied in filename order.\ntype Migration struct {\n\tName string\n\tSQL  string\n}\n\n// Migrations returns the embedded migrations sorted by filename.\nfunc Migrations() ([]Migration, error) {\n\tentries, err := fs.ReadDir(migrationFS, \"migrations\")\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tvar out []Migration\n\tfor _, e := range entries {\n\t\tif e.IsDir() || !strings.HasSuffix(e.Name(), \".sql\") {\n\t\t\tcontinue\n\t\t}\n\t\tbody, err := migrationFS.ReadFile(\"migrations/\" + e.Name())\n\t\tif err != nil {\n\t\t\treturn nil, err\n\t\t}\n\t\tout = append(out, Migration{Name: e.Name(), SQL: string(body)})\n\t}\n\tsort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })\n\treturn out, nil\n}\n\n// Migrate applies any migrations not yet recorded in schema_migrations.\n// Each migration runs in its own transaction.\nfunc Migrate(ctx context.Context, pool *pgxpool.Pool) error {\n\tif _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (\n\t\tname       text PRIMARY KEY,\n\t\tapplied_at timestamptz NOT NULL DEFAULT now()\n\t)`); err != nil {\n\t\treturn fmt.Errorf(\"create schema_migrations: %w\", err)\n\t}\n\n\tmigrations, err := Migrations()\n\tif err != nil {\n\t\treturn err\n\t}\n\tfor _, m := range migrations {\n\t\tvar applied bool\n\t\tif err := pool.QueryRow(ctx,\n\t\t\t`SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE name = $1)`, m.Name,\n\t\t).Scan(&applied); err != nil {\n\t\t\treturn fmt.Errorf(\"check %s: %w\", m.Name, err)\n\t\t}\n\t\tif applied {\n\t\t\tcontinue\n\t\t}\n\n\t\ttx, err := pool.Begin(ctx)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif _, err := tx.Exec(ctx, m.SQL); err != nil {\n\t\t\ttx.Rollback(ctx)\n\t\t\treturn fmt.Errorf(\"apply %s: %w\", m.Name, err)\n\t\t}\n\t\tif _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (name) VALUES ($1)`, m.Name); err != nil {\n\t\t\ttx.Rollback(ctx)\n\t\t\treturn fmt.Errorf(\"record %s: %w\", m.Name, err)\n\t\t}\n\t\tif err := tx.Commit(ctx); err != nil {\n\t\t\treturn fmt.Errorf(\"commit %s: %w\", m.Name, err)\n\t\t}\n\t}\n\treturn nil\n}\n"
+  },
+  {
+   "path": "server/internal/db/migrations/0001_init.sql",
+   "group": "server",
+   "lang": "sql",
+   "lines": 19,
+   "note": "The schema: the sync_seq sequence and the fasts table.",
+   "summary": "Every synced write takes the next value from this sequence. Clients pull\n\"everything with server_seq > cursor\", which avoids relying on device clocks.",
+   "symbols": [
+    {
+     "kind": "sequence",
+     "name": "sync_seq",
+     "line": 3,
+     "depth": 0,
+     "doc": "Every synced write takes the next value from this sequence. Clients pull\n\"everything with server_seq > cursor\", which avoids relying on device clocks."
+    },
+    {
+     "kind": "table",
+     "name": "fasts",
+     "line": 5,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "index",
+     "name": "fasts_server_seq_idx",
+     "line": 19,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "-- Every synced write takes the next value from this sequence. Clients pull\n-- \"everything with server_seq > cursor\", which avoids relying on device clocks.\nCREATE SEQUENCE sync_seq;\n\nCREATE TABLE fasts (\n    id           uuid PRIMARY KEY,\n    started_at   timestamptz NOT NULL,\n    ended_at     timestamptz,\n    goal_seconds integer     NOT NULL CHECK (goal_seconds > 0),\n    notes        text        NOT NULL DEFAULT '',\n    created_at   timestamptz NOT NULL,\n    updated_at   timestamptz NOT NULL,\n    deleted_at   timestamptz,\n    origin       text        NOT NULL,\n    server_seq   bigint      NOT NULL DEFAULT nextval('sync_seq'),\n    CHECK (ended_at IS NULL OR ended_at >= started_at)\n);\n\nCREATE INDEX fasts_server_seq_idx ON fasts (server_seq);\n"
+  },
+  {
+   "path": "server/internal/api/api_test.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 139,
+   "note": "Handler tests using a fake store: auth, parameter parsing, decoding and error mapping.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "const",
+     "name": "testToken",
+     "line": 16,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "fakeSyncer",
+     "line": 18,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(*fakeSyncer) Push",
+     "line": 25,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "method",
+     "name": "(*fakeSyncer) Pull",
+     "line": 33,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "newTestServer",
+     "line": 38,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "do",
+     "line": 45,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestHealthzNeedsNoToken",
+     "line": 62,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestSyncRequiresToken",
+     "line": 69,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestPullParams",
+     "line": 78,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestPushDecodesBody",
+     "line": 102,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestPushRejectsBadInput",
+     "line": 122,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestPushValidationErrorIs400",
+     "line": 134,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "package api\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"io\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"strings\"\n\t\"testing\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst testToken = \"test-token-0123456789-0123456789-abcdef\"\n\ntype fakeSyncer struct {\n\tpushed    store.Changes\n\tpushErr   error\n\tpullSince int64\n\tpullLimit int\n}\n\nfunc (f *fakeSyncer) Push(_ context.Context, c store.Changes) (store.PushResult, error) {\n\tf.pushed = c\n\tif f.pushErr != nil {\n\t\treturn store.PushResult{}, f.pushErr\n\t}\n\treturn store.PushResult{Applied: []string{\"a\"}, Stale: []string{}}, nil\n}\n\nfunc (f *fakeSyncer) Pull(_ context.Context, since int64, limit int) (store.PullResult, error) {\n\tf.pullSince, f.pullLimit = since, limit\n\treturn store.PullResult{Changes: store.Changes{Fasts: []store.Fast{}}, Cursor: since}, nil\n}\n\nfunc newTestServer(t *testing.T, s Syncer) *httptest.Server {\n\tt.Helper()\n\tsrv := httptest.NewServer(New(s, testToken, slog.New(slog.NewTextHandler(io.Discard, nil))))\n\tt.Cleanup(srv.Close)\n\treturn srv\n}\n\nfunc do(t *testing.T, method, url, token, body string) *http.Response {\n\tt.Helper()\n\treq, err := http.NewRequest(method, url, strings.NewReader(body))\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif token != \"\" {\n\t\treq.Header.Set(\"Authorization\", \"Bearer \"+token)\n\t}\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tt.Cleanup(func() { resp.Body.Close() })\n\treturn resp\n}\n\nfunc TestHealthzNeedsNoToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tif resp := do(t, \"GET\", srv.URL+\"/healthz\", \"\", \"\"); resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n}\n\nfunc TestSyncRequiresToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor _, tok := range []string{\"\", \"wrong-token\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull\", tok, \"\"); resp.StatusCode != http.StatusUnauthorized {\n\t\t\tt.Errorf(\"token %q: status = %d, want 401\", tok, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPullParams(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\n\tresp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?since=42&limit=10\", testToken, \"\")\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif f.pullSince != 42 || f.pullLimit != 10 {\n\t\tt.Errorf(\"got since=%d limit=%d, want 42, 10\", f.pullSince, f.pullLimit)\n\t}\n\n\tdo(t, \"GET\", srv.URL+\"/v1/sync/pull\", testToken, \"\")\n\tif f.pullSince != 0 || f.pullLimit != defaultPullLimit {\n\t\tt.Errorf(\"defaults: got since=%d limit=%d\", f.pullSince, f.pullLimit)\n\t}\n\n\tfor _, q := range []string{\"since=-1\", \"since=abc\", \"limit=0\", \"limit=5000\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?\"+q, testToken, \"\"); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", q, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushDecodesBody(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\tbody := `{\"fasts\":[{\"id\":\"7f1c5e3a-2b4d-4c6e-8f00-112233445566\",\"started_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"ended_at\":null,\"goal_seconds\":57600,\"notes\":\"\",\"created_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"updated_at\":\"2026-10-27T16:30:00Z\",\"deleted_at\":null,\"origin\":\"phone\"}]}`\n\n\tresp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body)\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif len(f.pushed.Fasts) != 1 || f.pushed.Fasts[0].GoalSeconds != 57600 {\n\t\tt.Errorf(\"pushed = %+v\", f.pushed)\n\t}\n\tvar res store.PushResult\n\tif err := json.NewDecoder(resp.Body).Decode(&res); err != nil || len(res.Applied) != 1 {\n\t\tt.Errorf(\"response = %+v, err %v\", res, err)\n\t}\n}\n\nfunc TestPushRejectsBadInput(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor name, body := range map[string]string{\n\t\t\"malformed\":     `{\"fasts\":[`,\n\t\t\"unknown field\": `{\"workouts\":[]}`,\n\t} {\n\t\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", name, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushValidationErrorIs400(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{pushErr: store.ValidationError{}})\n\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, `{\"fasts\":[]}`); resp.StatusCode != http.StatusBadRequest {\n\t\tt.Errorf(\"status = %d, want 400\", resp.StatusCode)\n\t}\n}\n"
+  },
+  {
+   "path": "server/internal/store/store_test.go",
+   "group": "server",
+   "lang": "go",
+   "lines": 146,
+   "note": "Validation tests plus a full round trip against a real, disposable Postgres.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "var",
+     "name": "t0",
+     "line": 12,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "validFast",
+     "line": 14,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestFastValidate",
+     "line": 25,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestMigrationsSorted",
+     "line": 48,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "TestSyncRoundTrip",
+     "line": 65,
+     "depth": 0,
+     "doc": "TestSyncRoundTrip runs against a real, disposable Postgres database:\n\nCOACH_TEST_DATABASE_URL=postgres://... go test ./...\n\nIt drops and recreates the schema, so never point it at real data."
+    }
+   ],
+   "source": "package store\n\nimport (\n\t\"context\"\n\t\"os\"\n\t\"testing\"\n\t\"time\"\n\n\t\"coach/server/internal/db\"\n)\n\nvar t0 = time.Date(2026, 10, 27, 16, 30, 0, 0, time.UTC)\n\nfunc validFast() Fast {\n\treturn Fast{\n\t\tID:          \"7f1c5e3a-2b4d-4c6e-8f00-112233445566\",\n\t\tStartedAt:   t0,\n\t\tGoalSeconds: 16 * 3600,\n\t\tCreatedAt:   t0,\n\t\tUpdatedAt:   t0,\n\t\tOrigin:      \"phone\",\n\t}\n}\n\nfunc TestFastValidate(t *testing.T) {\n\tbefore := t0.Add(-time.Hour)\n\tcases := map[string]func(*Fast){\n\t\t\"bad id\":           func(f *Fast) { f.ID = \"not-a-uuid\" },\n\t\t\"no start\":         func(f *Fast) { f.StartedAt = time.Time{} },\n\t\t\"ends before\":      func(f *Fast) { f.EndedAt = &before },\n\t\t\"zero goal\":        func(f *Fast) { f.GoalSeconds = 0 },\n\t\t\"unknown origin\":   func(f *Fast) { f.Origin = \"fridge\" },\n\t\t\"updated<created\":  func(f *Fast) { f.UpdatedAt = before },\n\t\t\"missing metadata\": func(f *Fast) { f.CreatedAt = time.Time{} },\n\t}\n\tif err := validFast().Validate(); err != nil {\n\t\tt.Fatalf(\"valid fast rejected: %v\", err)\n\t}\n\tfor name, mutate := range cases {\n\t\tf := validFast()\n\t\tmutate(&f)\n\t\tif err := f.Validate(); err == nil {\n\t\t\tt.Errorf(\"%s: expected error\", name)\n\t\t}\n\t}\n}\n\nfunc TestMigrationsSorted(t *testing.T) {\n\tms, err := db.Migrations()\n\tif err != nil || len(ms) == 0 {\n\t\tt.Fatalf(\"migrations: %v (n=%d)\", err, len(ms))\n\t}\n\tfor i := 1; i < len(ms); i++ {\n\t\tif ms[i-1].Name >= ms[i].Name {\n\t\t\tt.Errorf(\"out of order: %s, %s\", ms[i-1].Name, ms[i].Name)\n\t\t}\n\t}\n}\n\n// TestSyncRoundTrip runs against a real, disposable Postgres database:\n//\n//\tCOACH_TEST_DATABASE_URL=postgres://... go test ./...\n//\n// It drops and recreates the schema, so never point it at real data.\nfunc TestSyncRoundTrip(t *testing.T) {\n\turl := os.Getenv(\"COACH_TEST_DATABASE_URL\")\n\tif url == \"\" {\n\t\tt.Skip(\"COACH_TEST_DATABASE_URL not set\")\n\t}\n\tctx := context.Background()\n\tpool, err := db.Connect(ctx, url)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tdefer pool.Close()\n\tif _, err := pool.Exec(ctx, `DROP SCHEMA public CASCADE; CREATE SCHEMA public`); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif err := db.Migrate(ctx, pool); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif err := db.Migrate(ctx, pool); err != nil {\n\t\tt.Fatalf(\"second migrate should be a no-op: %v\", err)\n\t}\n\ts := New(pool)\n\n\tf := validFast()\n\tres, err := s.Push(ctx, Changes{Fasts: []Fast{f}})\n\tif err != nil || len(res.Applied) != 1 {\n\t\tt.Fatalf(\"first push: %+v, %v\", res, err)\n\t}\n\n\t// Re-pushing the same version is stale, not an error.\n\tres, err = s.Push(ctx, Changes{Fasts: []Fast{f}})\n\tif err != nil || len(res.Stale) != 1 {\n\t\tt.Fatalf(\"repush: %+v, %v\", res, err)\n\t}\n\n\tpage, err := s.Pull(ctx, 0, 100)\n\tif err != nil || len(page.Changes.Fasts) != 1 {\n\t\tt.Fatalf(\"pull: %+v, %v\", page, err)\n\t}\n\tcursor := page.Cursor\n\n\t// A newer edit wins and moves the row past the cursor.\n\tend := t0.Add(16 * time.Hour)\n\tf.EndedAt, f.UpdatedAt = &end, end\n\tif res, err := s.Push(ctx, Changes{Fasts: []Fast{f}}); err != nil || len(res.Applied) != 1 {\n\t\tt.Fatalf(\"update push: %+v, %v\", res, err)\n\t}\n\tpage, err = s.Pull(ctx, cursor, 100)\n\tif err != nil || len(page.Changes.Fasts) != 1 || page.Changes.Fasts[0].EndedAt == nil {\n\t\tt.Fatalf(\"pull after update: %+v, %v\", page, err)\n\t}\n\n\t// An older edit loses.\n\tolder := f\n\tolder.UpdatedAt = t0.Add(time.Hour)\n\tolder.Notes = \"stale\"\n\tif res, _ := s.Push(ctx, Changes{Fasts: []Fast{older}}); len(res.Stale) != 1 {\n\t\tt.Fatalf(\"older edit should be stale: %+v\", res)\n\t}\n\n\t// Paging: three new rows, limit 2.\n\tvar batch []Fast\n\tfor _, id := range []string{\n\t\t\"00000000-0000-4000-8000-000000000001\",\n\t\t\"00000000-0000-4000-8000-000000000002\",\n\t\t\"00000000-0000-4000-8000-000000000003\",\n\t} {\n\t\tg := validFast()\n\t\tg.ID = id\n\t\tbatch = append(batch, g)\n\t}\n\tif _, err := s.Push(ctx, Changes{Fasts: batch}); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tpage, _ = s.Pull(ctx, 0, 2)\n\tif len(page.Changes.Fasts) != 2 || !page.HasMore {\n\t\tt.Fatalf(\"page 1: %+v\", page)\n\t}\n\tpage, _ = s.Pull(ctx, page.Cursor, 2)\n\tif len(page.Changes.Fasts) != 2 || page.HasMore {\n\t\tt.Fatalf(\"page 2: %+v\", page)\n\t}\n}\n"
+  },
+  {
+   "path": "server/Dockerfile",
+   "group": "server",
+   "lang": "dockerfile",
+   "lines": 14,
+   "note": "Two-stage build: cross-compile on the build machine, ship a distroless image.",
+   "summary": "Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\nplatform (linux/amd64 on the Synology).",
+   "symbols": [],
+   "source": "# Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\n# platform (linux/amd64 on the Synology).\nFROM --platform=$BUILDPLATFORM golang:1.27 AS build\nARG TARGETOS TARGETARCH\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \\\n    go build -trimpath -ldflags=\"-s -w\" -o /out/api ./cmd/api\n\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/api /api\nENTRYPOINT [\"/api\"]\n"
+  },
+  {
+   "path": "server/go.mod",
+   "group": "server",
+   "lang": "go-mod",
+   "lines": 13,
+   "note": "Module definition. The only dependency is pgx.",
+   "summary": "",
+   "symbols": [],
+   "source": "module coach/server\n\ngo 1.27.3\n\nrequire github.com/jackc/pgx/v5 v5.11.0\n\nrequire (\n\tgithub.com/jackc/pgpassfile v1.0.0 // indirect\n\tgithub.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect\n\tgithub.com/jackc/puddle/v2 v2.2.2 // indirect\n\tgolang.org/x/sync v0.17.0 // indirect\n\tgolang.org/x/text v0.29.0 // indirect\n)\n"
+  },
+  {
+   "path": "deploy/compose.yaml",
+   "group": "deploy",
+   "lang": "yaml",
+   "lines": 51,
+   "note": "Three services. ts joins the tailnet; api shares its network namespace; db is reachable only inside the project and via the ts TCP forward.",
+   "summary": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").",
+   "symbols": [
+    {
+     "kind": "key",
+     "name": "name",
+     "line": 3,
+     "depth": 0,
+     "doc": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\")."
+    },
+    {
+     "kind": "key",
+     "name": "services",
+     "line": 5,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "service",
+     "name": "ts",
+     "line": 6,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "service",
+     "name": "db",
+     "line": 18,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "service",
+     "name": "api",
+     "line": 34,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "# Coach backend. Nothing here publishes a port on the LAN: the only way in is\n# the tailnet, through the `ts` container (hostname \"coach\").\nname: coach\n\nservices:\n  ts:\n    image: tailscale/tailscale:stable\n    hostname: coach\n    environment:\n      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}\n      TS_STATE_DIR: /var/lib/tailscale\n      TS_SERVE_CONFIG: /config/serve.json\n    volumes:\n      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale\n      - ./serve.json:/config/serve.json:ro\n    restart: unless-stopped\n\n  db:\n    image: postgres:17\n    container_name: coach-db\n    environment:\n      POSTGRES_DB: coach\n      POSTGRES_USER: coach\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}\n    volumes:\n      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U coach -d coach\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n    restart: unless-stopped\n\n  api:\n    # On the NAS this image is loaded from build-image.sh (it can't build\n    # there). Elsewhere, compose builds it if it's missing.\n    image: coach-api:latest\n    build: ../server\n    # Shares the ts container's network, so tailscale serve reaches it on\n    # 127.0.0.1:8080 and it reaches Postgres as \"db\".\n    network_mode: service:ts\n    environment:\n      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable\n      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}\n      LISTEN_ADDR: 127.0.0.1:8080\n    depends_on:\n      ts:\n        condition: service_started\n      db:\n        condition: service_healthy\n    restart: unless-stopped\n"
+  },
+  {
+   "path": "deploy/serve.json",
+   "group": "deploy",
+   "lang": "json",
+   "lines": 13,
+   "note": "Tailscale serve config: HTTPS on 443 to the API, TCP 5432 to Postgres.",
+   "summary": "",
+   "symbols": [],
+   "source": "{\n  \"TCP\": {\n    \"443\": { \"HTTPS\": true },\n    \"5432\": { \"TCPForward\": \"db:5432\" }\n  },\n  \"Web\": {\n    \"${TS_CERT_DOMAIN}:443\": {\n      \"Handlers\": {\n        \"/\": { \"Proxy\": \"http://127.0.0.1:8080\" }\n      }\n    }\n  }\n}\n"
+  },
+  {
+   "path": "deploy/build-image.sh",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 30,
+   "note": "Builds the amd64 API image on the Mac (the NAS can't build) and optionally ships and restarts it.",
+   "summary": "Builds the API image for the NAS (linux/amd64) on this machine.\n\nSynology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\nso images can't be built on the NAS. They run there fine.\n\n./build-image.sh                 # writes dist/coach-api.tar\n./build-image.sh user@nas-host   # also copies it over, loads it and\n# restarts the project (asks for sudo)\n\nREMOTE_DIR overrides where the project lives on the NAS.",
+   "symbols": [],
+   "source": "#!/bin/sh\n# Builds the API image for the NAS (linux/amd64) on this machine.\n#\n# Synology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\n# so images can't be built on the NAS. They run there fine.\n#\n#   ./build-image.sh                 # writes dist/coach-api.tar\n#   ./build-image.sh user@nas-host   # also copies it over, loads it and\n#                                    # restarts the project (asks for sudo)\n#\n# REMOTE_DIR overrides where the project lives on the NAS.\nset -eu\ncd \"$(dirname \"$0\")\"\n\nmkdir -p dist\ndocker buildx build --platform linux/amd64 -t coach-api:latest \\\n  --output type=docker,dest=dist/coach-api.tar ../server\necho \"built dist/coach-api.tar\"\n\n[ $# -eq 0 ] && exit 0\n\nNAS=$1\nREMOTE_DIR=${REMOTE_DIR:-/volume1/docker/coach/deploy}\nDOCKER=/usr/local/bin/docker # not on sudo's PATH on DSM\n\n# -O: legacy scp protocol, which works without enabling SFTP in DSM.\nscp -O dist/coach-api.tar \"$NAS:$REMOTE_DIR/coach-api.tar\"\nssh -t \"$NAS\" \"sudo $DOCKER load -i $REMOTE_DIR/coach-api.tar \\\n  && rm $REMOTE_DIR/coach-api.tar \\\n  && cd $REMOTE_DIR && sudo $DOCKER compose up -d\"\n"
+  },
+  {
+   "path": "deploy/backup.sh",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 19,
+   "note": "Nightly pg_dump with 30-day retention.",
+   "summary": "Nightly Postgres dump. On the Synology, run it from\nControl Panel > Task Scheduler as root, e.g.:\n/volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\nand include that folder in a Hyper Backup task for an off-box copy.",
+   "symbols": [],
+   "source": "#!/bin/sh\n# Nightly Postgres dump. On the Synology, run it from\n# Control Panel > Task Scheduler as root, e.g.:\n#   /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\n# and include that folder in a Hyper Backup task for an off-box copy.\nset -eu\n\nBACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}\nKEEP_DAYS=${2:-30}\n\nmkdir -p \"$BACKUP_DIR\"\nout=\"$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump\"\n\n# Custom format (-Fc) is compressed and restores with pg_restore.\ndocker exec coach-db pg_dump -U coach -d coach -Fc > \"$out.tmp\"\nmv \"$out.tmp\" \"$out\"\n\nfind \"$BACKUP_DIR\" -name 'coach-*.dump' -mtime +\"$KEEP_DAYS\" -delete\necho \"wrote $out\"\n"
+  },
+  {
+   "path": "deploy/.env.example",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 14,
+   "note": "Template for the secrets file. The real deploy/.env is git-ignored.",
+   "summary": "Copy to .env and fill in. Never commit .env.",
+   "symbols": [],
+   "source": "# Copy to .env and fill in. Never commit .env.\n\n# Tailscale auth key for the \"coach\" node (admin console > Settings > Keys).\n# Use a reusable or pre-approved key, and tag it if you use ACL tags.\nTS_AUTHKEY=\n\n# Generate both with: openssl rand -hex 32\n# (hex keeps them URL-safe, since the password goes into DATABASE_URL)\nPOSTGRES_PASSWORD=\nCOACH_API_TOKEN=\n\n# Where container data lives. On the Synology, use a path on the volume,\n# e.g. /volume1/docker/coach/data\nDATA_DIR=./data\n"
+  },
+  {
+   "path": "deploy/README.md",
+   "group": "deploy",
+   "lang": "markdown",
+   "lines": 67,
+   "note": "Setup and operations guide.",
+   "summary": "Three containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`). Nothing is published on the LAN. Clients reach the server at `https://coach.<your-tailnet>.ts.net` over Tailscale.",
+   "symbols": [
+    {
+     "kind": "h1",
+     "name": "Deploying the backend",
+     "line": 1,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "One-time Tailscale setup",
+     "line": 7,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Synology (DS2419+II, DSM 7.2)",
+     "line": 13,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Local development (Mac)",
+     "line": 38,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Analysis access",
+     "line": 57,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Moving to a Mac mini later",
+     "line": 63,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "# Deploying the backend\n\nThree containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`).\nNothing is published on the LAN. Clients reach the server at\n`https://coach.<your-tailnet>.ts.net` over Tailscale.\n\n## One-time Tailscale setup\n\n1. In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates** (DNS page).\n2. Create an auth key (Settings > Keys) and put it in `.env` as `TS_AUTHKEY`.\n3. Install Tailscale on the iPhone and the laptop, signed in to the same tailnet.\n\n## Synology (DS2419+II, DSM 7.2)\n\n1. Install **Container Manager** from Package Center.\n2. Copy the repo to the NAS, e.g. `/volume1/docker/coach` (the `server/` and `deploy/` folders are what's needed).\n3. In `deploy/`, `cp .env.example .env` and fill it in. Set `DATA_DIR=/volume1/docker/coach/data`.\n4. Build the API image **on the Mac** and load it onto the NAS (enable SSH in Control Panel > Terminal first):\n\n   ```sh\n   deploy/build-image.sh you@nas-hostname\n   ```\n\n   This cross-builds for linux/amd64, copies the image over, loads it and runs\n   `docker compose up -d`. It asks for your NAS password for sudo.\n   Without an argument it only writes `deploy/dist/coach-api.tar`, which you can\n   load through Container Manager > Image > Add > From file instead.\n\n   **Don't build on the NAS.** DSM's kernel has no seccomp support, so\n   `docker compose up --build` (or a Container Manager project build) fails with\n   `seccomp: config provided but seccomp not supported`. Running containers works fine.\n5. Check it's up from the laptop: `curl https://coach.<tailnet>.ts.net/healthz` should return `{\"status\":\"ok\"}`.\n   The first request can take a few seconds while the certificate is issued.\n6. Schedule `backup.sh` (see the comment at the top of it).\n\nTo deploy a new API version later, run `deploy/build-image.sh you@nas-hostname` again.\n\n## Local development (Mac)\n\nUse the same compose file with Docker Desktop running and a separate auth key\n(it shows up as another `coach` node, e.g. `coach-1`). Or run only Postgres\nand the API directly:\n\n```sh\ndocker run -d --name coach-dev-db -e POSTGRES_PASSWORD=dev -p 127.0.0.1:5432:5432 postgres:17\ncd server\nDATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable \\\nCOACH_API_TOKEN=$(openssl rand -hex 32) go run ./cmd/api\n```\n\nIntegration tests need a disposable database. They drop the schema:\n\n```sh\nCOACH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable go test ./...\n```\n\n## Analysis access\n\nPostgres is forwarded on the tailnet at `coach.<tailnet>.ts.net:5432`, for\npsql, Python notebooks and the like. Consider creating a read-only role for\nanalysis, separate from the `coach` user the API uses.\n\n## Moving to a Mac mini later\n\nStop the project, copy `DATA_DIR` and `.env`, and run `docker compose up -d`\non the new machine. The tailnet name stays `coach` as long as the `tailscale`\nstate directory comes along.\n"
+  },
+  {
+   "path": "ios/Coach/Data/AppDatabase.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 98,
+   "note": "GRDB setup, the v1 migration, and helpers for the push queue and sync state.",
+   "summary": "The on-device SQLite database. Tables mirror the server's, plus two local\nbookkeeping tables: `pending_change` (records not yet pushed) and\n`sync_state` (the pull cursor and similar).",
+   "symbols": [
+    {
+     "kind": "class",
+     "name": "AppDatabase",
+     "line": 7,
+     "depth": 0,
+     "doc": "The on-device SQLite database. Tables mirror the server's, plus two local\nbookkeeping tables: `pending_change` (records not yet pushed) and\n`sync_state` (the pull cursor and similar)."
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 10,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "onDisk",
+     "line": 16,
+     "depth": 1,
+     "doc": "The app's database in Application Support."
+    },
+    {
+     "kind": "func",
+     "name": "inMemory",
+     "line": 25,
+     "depth": 1,
+     "doc": "A throwaway database for tests and previews."
+    },
+    {
+     "kind": "extension",
+     "name": "Database",
+     "line": 66,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "markPending",
+     "line": 68,
+     "depth": 1,
+     "doc": "Marks a record as changed locally so the next sync pushes it."
+    },
+    {
+     "kind": "func",
+     "name": "clearPending",
+     "line": 74,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pendingIDs",
+     "line": 80,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "syncValue",
+     "line": 86,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "setSyncValue",
+     "line": 90,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\n\n/// The on-device SQLite database. Tables mirror the server's, plus two local\n/// bookkeeping tables: `pending_change` (records not yet pushed) and\n/// `sync_state` (the pull cursor and similar).\nfinal class AppDatabase: Sendable {\n    let writer: any DatabaseWriter\n\n    init(_ writer: any DatabaseWriter) throws {\n        self.writer = writer\n        try Self.migrator.migrate(writer)\n    }\n\n    /// The app's database in Application Support.\n    static func onDisk() throws -> AppDatabase {\n        let dir = try FileManager.default.url(\n            for: .applicationSupportDirectory, in: .userDomainMask,\n            appropriateFor: nil, create: true)\n        let pool = try DatabasePool(path: dir.appending(path: \"coach.sqlite\").path)\n        return try AppDatabase(pool)\n    }\n\n    /// A throwaway database for tests and previews.\n    static func inMemory() throws -> AppDatabase {\n        try AppDatabase(DatabaseQueue())\n    }\n\n    private static var migrator: DatabaseMigrator {\n        var migrator = DatabaseMigrator()\n\n        migrator.registerMigration(\"v1\") { db in\n            // Timestamps are integer milliseconds since 1970 (see Date.epochMillis).\n            try db.create(table: \"fast\") { t in\n                t.primaryKey(\"id\", .text)\n                t.column(\"started_at\", .integer).notNull()\n                t.column(\"ended_at\", .integer)\n                t.column(\"goal_seconds\", .integer).notNull()\n                t.column(\"notes\", .text).notNull().defaults(to: \"\")\n                t.column(\"created_at\", .integer).notNull()\n                t.column(\"updated_at\", .integer).notNull()\n                t.column(\"deleted_at\", .integer)\n                t.column(\"origin\", .text).notNull()\n                t.column(\"server_seq\", .integer)\n            }\n            try db.create(index: \"fast_active\", on: \"fast\", columns: [\"ended_at\", \"deleted_at\"])\n\n            try db.create(table: \"pending_change\") { t in\n                t.column(\"entity\", .text).notNull()\n                t.column(\"record_id\", .text).notNull()\n                t.primaryKey([\"entity\", \"record_id\"])\n            }\n\n            try db.create(table: \"sync_state\") { t in\n                t.primaryKey(\"key\", .text)\n                t.column(\"value\", .text).notNull()\n            }\n        }\n\n        return migrator\n    }\n}\n\n// MARK: - Sync bookkeeping\n\nextension Database {\n    /// Marks a record as changed locally so the next sync pushes it.\n    func markPending(_ entity: String, id: String) throws {\n        try execute(\n            sql: \"INSERT OR IGNORE INTO pending_change (entity, record_id) VALUES (?, ?)\",\n            arguments: [entity, id])\n    }\n\n    func clearPending(_ entity: String, id: String) throws {\n        try execute(\n            sql: \"DELETE FROM pending_change WHERE entity = ? AND record_id = ?\",\n            arguments: [entity, id])\n    }\n\n    func pendingIDs(_ entity: String) throws -> [String] {\n        try String.fetchAll(\n            self, sql: \"SELECT record_id FROM pending_change WHERE entity = ?\",\n            arguments: [entity])\n    }\n\n    func syncValue(_ key: String) throws -> String? {\n        try String.fetchOne(self, sql: \"SELECT value FROM sync_state WHERE key = ?\", arguments: [key])\n    }\n\n    func setSyncValue(_ key: String, _ value: String) throws {\n        try execute(\n            sql: \"\"\"\n                INSERT INTO sync_state (key, value) VALUES (?, ?)\n                ON CONFLICT (key) DO UPDATE SET value = excluded.value\n                \"\"\",\n            arguments: [key, value])\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Data/Fast.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 98,
+   "note": "The Fast record. One struct is both the SQLite row (integer ms) and the JSON wire format (server field names).",
+   "summary": "One fasting period. `endedAt` is nil while it's running.\n\nThe same struct is the database row and the sync wire format; the coding\nkeys match the server's JSON field names.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "Fast",
+     "line": 8,
+     "depth": 0,
+     "doc": "One fasting period. `endedAt` is nil while it's running.\n\nThe same struct is the database row and the sync wire format; the coding\nkeys match the server's JSON field names."
+    },
+    {
+     "kind": "enum",
+     "name": "CodingKeys",
+     "line": 22,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "elapsed",
+     "line": 35,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "extension",
+     "name": "Fast",
+     "line": 43,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 46,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "encode",
+     "line": 59,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "active",
+     "line": 73,
+     "depth": 1,
+     "doc": "The running fast, if any."
+    },
+    {
+     "kind": "extension",
+     "name": "Date",
+     "line": 81,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "var",
+     "name": "nowMillis",
+     "line": 86,
+     "depth": 1,
+     "doc": "Now, at whole-millisecond precision. Every timestamp the app writes\ngoes through this so it survives SQLite (integer ms), JSON (3 digits)\nand Postgres (\u00b5s) round trips exactly, which last-writer-wins\ncomparisons rely on."
+    },
+    {
+     "kind": "var",
+     "name": "truncatedToMillis",
+     "line": 91,
+     "depth": 1,
+     "doc": "Rounds to the nearest millisecond. Rounding (not flooring) keeps this\nidempotent: k/1000 as a Double can sit just below k ms, and flooring\nit again would lose a millisecond."
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 95,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\n\n/// One fasting period. `endedAt` is nil while it's running.\n///\n/// The same struct is the database row and the sync wire format; the coding\n/// keys match the server's JSON field names.\nstruct Fast: Codable, Equatable, Identifiable, Sendable {\n    static let entity = \"fasts\"\n\n    var id: String\n    var startedAt: Date\n    var endedAt: Date?\n    var goalSeconds: Int\n    var notes: String\n    var createdAt: Date\n    var updatedAt: Date\n    var deletedAt: Date?\n    var origin: String\n    var serverSeq: Int64?\n\n    enum CodingKeys: String, CodingKey {\n        case id, notes, origin\n        case startedAt = \"started_at\"\n        case endedAt = \"ended_at\"\n        case goalSeconds = \"goal_seconds\"\n        case createdAt = \"created_at\"\n        case updatedAt = \"updated_at\"\n        case deletedAt = \"deleted_at\"\n        case serverSeq = \"server_seq\"\n    }\n\n    var isActive: Bool { endedAt == nil && deletedAt == nil }\n\n    func elapsed(at now: Date) -> TimeInterval {\n        (endedAt ?? now).timeIntervalSince(startedAt)\n    }\n\n    var goalDate: Date { startedAt.addingTimeInterval(TimeInterval(goalSeconds)) }\n}\n\n// Explicit row mapping so nil optionals are written as NULL on update.\nextension Fast: FetchableRecord, PersistableRecord {\n    static let databaseTableName = \"fast\"\n\n    init(row: Row) throws {\n        id = row[\"id\"]\n        startedAt = Date(epochMillis: row[\"started_at\"])\n        endedAt = (row[\"ended_at\"] as Int64?).map(Date.init(epochMillis:))\n        goalSeconds = row[\"goal_seconds\"]\n        notes = row[\"notes\"]\n        createdAt = Date(epochMillis: row[\"created_at\"])\n        updatedAt = Date(epochMillis: row[\"updated_at\"])\n        deletedAt = (row[\"deleted_at\"] as Int64?).map(Date.init(epochMillis:))\n        origin = row[\"origin\"]\n        serverSeq = row[\"server_seq\"]\n    }\n\n    func encode(to container: inout PersistenceContainer) throws {\n        container[\"id\"] = id\n        container[\"started_at\"] = startedAt.epochMillis\n        container[\"ended_at\"] = endedAt?.epochMillis\n        container[\"goal_seconds\"] = goalSeconds\n        container[\"notes\"] = notes\n        container[\"created_at\"] = createdAt.epochMillis\n        container[\"updated_at\"] = updatedAt.epochMillis\n        container[\"deleted_at\"] = deletedAt?.epochMillis\n        container[\"origin\"] = origin\n        container[\"server_seq\"] = serverSeq\n    }\n\n    /// The running fast, if any.\n    static func active(_ db: Database) throws -> Fast? {\n        try Fast\n            .filter(Column(\"ended_at\") == nil && Column(\"deleted_at\") == nil)\n            .order(Column(\"started_at\").desc)\n            .fetchOne(db)\n    }\n}\n\nextension Date {\n    /// Now, at whole-millisecond precision. Every timestamp the app writes\n    /// goes through this so it survives SQLite (integer ms), JSON (3 digits)\n    /// and Postgres (\u00b5s) round trips exactly, which last-writer-wins\n    /// comparisons rely on.\n    static var nowMillis: Date { Date().truncatedToMillis }\n\n    /// Rounds to the nearest millisecond. Rounding (not flooring) keeps this\n    /// idempotent: k/1000 as a Double can sit just below k ms, and flooring\n    /// it again would lose a millisecond.\n    var truncatedToMillis: Date { Date(epochMillis: epochMillis) }\n\n    var epochMillis: Int64 { Int64((timeIntervalSince1970 * 1000).rounded()) }\n\n    init(epochMillis: Int64) {\n        self.init(timeIntervalSince1970: Double(epochMillis) / 1000)\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Data/FastRepository.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 64,
+   "note": "All local writes for fasts. Each one bumps updated_at strictly and queues the record.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "enum",
+     "name": "FastError",
+     "line": 4,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "FastRepository",
+     "line": 18,
+     "depth": 0,
+     "doc": "Local writes for fasts. Every change bumps `updated_at` and queues the\nrecord for the next push."
+    },
+    {
+     "kind": "func",
+     "name": "start",
+     "line": 23,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "end",
+     "line": 37,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "setGoal",
+     "line": 43,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "delete",
+     "line": 48,
+     "depth": 1,
+     "doc": "Soft delete: the tombstone syncs so other devices drop it too."
+    },
+    {
+     "kind": "func",
+     "name": "modify",
+     "line": 52,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\n\nenum FastError: LocalizedError {\n    case alreadyActive\n    case notFound\n\n    var errorDescription: String? {\n        switch self {\n        case .alreadyActive: \"A fast is already running.\"\n        case .notFound: \"That fast no longer exists.\"\n        }\n    }\n}\n\n/// Local writes for fasts. Every change bumps `updated_at` and queues the\n/// record for the next push.\nstruct FastRepository: Sendable {\n    let database: AppDatabase\n    var origin = \"phone\"\n\n    @discardableResult\n    func start(goalSeconds: Int, at start: Date = .nowMillis) throws -> Fast {\n        try database.writer.write { db in\n            if try Fast.active(db) != nil { throw FastError.alreadyActive }\n            let now = Date.nowMillis\n            let fast = Fast(\n                id: UUID().uuidString.lowercased(), startedAt: start.truncatedToMillis,\n                endedAt: nil, goalSeconds: goalSeconds, notes: \"\",\n                createdAt: now, updatedAt: now, deletedAt: nil, origin: origin, serverSeq: nil)\n            try fast.insert(db)\n            try db.markPending(Fast.entity, id: fast.id)\n            return fast\n        }\n    }\n\n    func end(_ id: String, at end: Date = .nowMillis) throws {\n        try modify(id) { fast in\n            fast.endedAt = max(end.truncatedToMillis, fast.startedAt)\n        }\n    }\n\n    func setGoal(_ id: String, seconds: Int) throws {\n        try modify(id) { $0.goalSeconds = seconds }\n    }\n\n    /// Soft delete: the tombstone syncs so other devices drop it too.\n    func delete(_ id: String) throws {\n        try modify(id) { $0.deletedAt = .nowMillis }\n    }\n\n    private func modify(_ id: String, _ change: @Sendable (inout Fast) -> Void) throws {\n        try database.writer.write { db in\n            guard var fast = try Fast.fetchOne(db, key: id) else { throw FastError.notFound }\n            change(&fast)\n            // Strictly newer, even within the same millisecond: the server\n            // ignores pushes whose updated_at isn't greater than its copy.\n            fast.updatedAt = max(Date.nowMillis, fast.updatedAt.addingTimeInterval(0.001))\n            fast.origin = origin\n            try fast.update(db)\n            try db.markPending(Fast.entity, id: fast.id)\n        }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Sync/SyncEngine.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 98,
+   "note": "One sync pass: push the queue in batches, then pull pages past the cursor and merge newer-wins.",
+   "summary": "One sync pass: push queued local changes, then pull everything newer than\nthe stored cursor.\n\nConflicts resolve last-writer-wins on `updated_at`, the same rule the\nserver applies, so both sides converge on the same record.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "SyncEngine",
+     "line": 9,
+     "depth": 0,
+     "doc": "One sync pass: push queued local changes, then pull everything newer than\nthe stored cursor.\n\nConflicts resolve last-writer-wins on `updated_at`, the same rule the\nserver applies, so both sides converge on the same record."
+    },
+    {
+     "kind": "struct",
+     "name": "Report",
+     "line": 14,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "run",
+     "line": 21,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "push",
+     "line": 28,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pull",
+     "line": 65,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "merge",
+     "line": 85,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\n\n/// One sync pass: push queued local changes, then pull everything newer than\n/// the stored cursor.\n///\n/// Conflicts resolve last-writer-wins on `updated_at`, the same rule the\n/// server applies, so both sides converge on the same record.\nstruct SyncEngine: Sendable {\n    let database: AppDatabase\n    var pushBatchSize = 200\n    var pullPageSize = 500\n\n    struct Report: Equatable, Sendable {\n        var pushed = 0\n        var pulled = 0\n    }\n\n    private static let cursorKey = \"cursor\"\n\n    func run(_ transport: some SyncTransport) async throws -> Report {\n        var report = Report()\n        report.pushed = try await push(transport)\n        report.pulled = try await pull(transport)\n        return report\n    }\n\n    private func push(_ transport: some SyncTransport) async throws -> Int {\n        var total = 0\n        // Bounded so a record that keeps changing can't loop forever.\n        for _ in 0..<50 {\n            let batch = try await database.writer.read { [pushBatchSize] db in\n                let ids = Array(try db.pendingIDs(Fast.entity).prefix(pushBatchSize))\n                return try Fast.filter(keys: ids).fetchAll(db)\n            }\n            if batch.isEmpty {\n                // Drop queue entries whose record no longer exists.\n                try await database.writer.write { db in\n                    for id in try db.pendingIDs(Fast.entity) where try !Fast.exists(db, key: id) {\n                        try db.clearPending(Fast.entity, id: id)\n                    }\n                }\n                break\n            }\n\n            _ = try await transport.push(Changes(fasts: batch))\n            total += batch.count\n\n            // Applied and stale both leave the queue: a stale record means the\n            // server has something newer, which the pull brings down. Only\n            // clear entries the user hasn't edited again since we read them.\n            try await database.writer.write { db in\n                for sent in batch {\n                    let current = try Fast.fetchOne(db, key: sent.id)\n                    if current?.updatedAt == sent.updatedAt {\n                        try db.clearPending(Fast.entity, id: sent.id)\n                    }\n                }\n            }\n            if batch.count < pushBatchSize { break }\n        }\n        return total\n    }\n\n    private func pull(_ transport: some SyncTransport) async throws -> Int {\n        var total = 0\n        var cursor = try await database.writer.read { db in\n            try db.syncValue(Self.cursorKey).flatMap(Int64.init) ?? 0\n        }\n        while true {\n            let page = try await transport.pull(since: cursor, limit: pullPageSize)\n            try await database.writer.write { db in\n                for remote in page.changes.fasts {\n                    try Self.merge(remote, db)\n                }\n                try db.setSyncValue(Self.cursorKey, String(page.cursor))\n            }\n            total += page.changes.fasts.count\n            cursor = page.cursor\n            if !page.hasMore { break }\n        }\n        return total\n    }\n\n    private static func merge(_ remote: Fast, _ db: Database) throws {\n        guard let local = try Fast.fetchOne(db, key: remote.id) else {\n            try remote.insert(db)\n            return\n        }\n        if local.updatedAt >= remote.updatedAt {\n            // Ours is as new or newer; keep it (it's queued if it needs pushing).\n            return\n        }\n        try remote.update(db)\n        // A queued local edit that lost to a newer remote one shouldn't be pushed.\n        try db.clearPending(Fast.entity, id: remote.id)\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Sync/WireFormat.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 84,
+   "note": "Request/response types and timestamp coding that matches Go exactly.",
+   "summary": "Request and response bodies for the server's /v1/sync endpoints.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "Changes",
+     "line": 4,
+     "depth": 0,
+     "doc": "Request and response bodies for the server's /v1/sync endpoints."
+    },
+    {
+     "kind": "struct",
+     "name": "PushResult",
+     "line": 10,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "PullResult",
+     "line": 15,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "CodingKeys",
+     "line": 20,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "Wire",
+     "line": 29,
+     "depth": 0,
+     "doc": "JSON coding matching the Go server: RFC 3339 timestamps. Go emits\nanywhere from 0 to 9 fractional digits, so decoding parses the fraction by\nhand; encoding always writes milliseconds."
+    },
+    {
+     "kind": "func",
+     "name": "encoder",
+     "line": 30,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "decoder",
+     "line": 39,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "format",
+     "line": 55,
+     "depth": 1,
+     "doc": "\"2026-10-27T16:30:00.123Z\", built from integer milliseconds so the\nfraction is exact."
+    },
+    {
+     "kind": "func",
+     "name": "parse",
+     "line": 62,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\n\n/// Request and response bodies for the server's /v1/sync endpoints.\nstruct Changes: Codable, Equatable, Sendable {\n    var fasts: [Fast] = []\n\n    var isEmpty: Bool { fasts.isEmpty }\n}\n\nstruct PushResult: Decodable, Sendable {\n    var applied: [String]\n    var stale: [String]\n}\n\nstruct PullResult: Decodable, Sendable {\n    var changes: Changes\n    var cursor: Int64\n    var hasMore: Bool\n\n    enum CodingKeys: String, CodingKey {\n        case changes, cursor\n        case hasMore = \"has_more\"\n    }\n}\n\n/// JSON coding matching the Go server: RFC 3339 timestamps. Go emits\n/// anywhere from 0 to 9 fractional digits, so decoding parses the fraction by\n/// hand; encoding always writes milliseconds.\nenum Wire {\n    static func encoder() -> JSONEncoder {\n        let e = JSONEncoder()\n        e.dateEncodingStrategy = .custom { date, encoder in\n            var c = encoder.singleValueContainer()\n            try c.encode(format(date))\n        }\n        return e\n    }\n\n    static func decoder() -> JSONDecoder {\n        let d = JSONDecoder()\n        d.dateDecodingStrategy = .custom { decoder in\n            let c = try decoder.singleValueContainer()\n            let s = try c.decode(String.self)\n            guard let date = parse(s) else {\n                throw DecodingError.dataCorruptedError(\n                    in: c, debugDescription: \"Invalid RFC 3339 timestamp: \\(s)\")\n            }\n            return date\n        }\n        return d\n    }\n\n    /// \"2026-10-27T16:30:00.123Z\", built from integer milliseconds so the\n    /// fraction is exact.\n    static func format(_ date: Date) -> String {\n        let ms = date.epochMillis\n        let seconds = ms >= 0 ? ms / 1000 : (ms - 999) / 1000\n        let base = Date(timeIntervalSince1970: Double(seconds)).formatted(.iso8601) // \"...:00Z\"\n        return String(base.dropLast()) + String(format: \".%03dZ\", ms - seconds * 1000)\n    }\n\n    static func parse(_ s: String) -> Date? {\n        // Split \"2026-10-27T16:30:00.123456Z\" into base, fraction and zone.\n        guard let tIndex = s.firstIndex(of: \"T\"),\n            let zoneStart = s[tIndex...].lastIndex(where: { $0 == \"Z\" || $0 == \"+\" || $0 == \"-\" })\n        else { return nil }\n        var head = String(s[..<zoneStart])\n        let zone = String(s[zoneStart...])\n        var digits = \"\"\n        if let dot = head.firstIndex(of: \".\") {\n            digits = String(head[head.index(after: dot)...])\n            guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }\n            head = String(head[..<dot])\n        }\n        guard let base = try? Date(head + zone, strategy: .iso8601) else { return nil }\n        if digits.count <= 3 {\n            // Whole milliseconds: build from integers so the result is exactly\n            // what Date(epochMillis:) produces locally.\n            let ms = Int64(digits.padding(toLength: 3, withPad: \"0\", startingAt: 0)) ?? 0\n            return Date(epochMillis: base.epochMillis + ms)\n        }\n        return base.addingTimeInterval(Double(\"0.\" + digits) ?? 0)\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Sync/SyncTransport.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 79,
+   "note": "The transport protocol (faked in tests) and the HTTPS implementation.",
+   "summary": "How the sync engine talks to the server. The HTTP implementation is below;\ntests use a fake.",
+   "symbols": [
+    {
+     "kind": "protocol",
+     "name": "SyncTransport",
+     "line": 5,
+     "depth": 0,
+     "doc": "How the sync engine talks to the server. The HTTP implementation is below;\ntests use a fake."
+    },
+    {
+     "kind": "func",
+     "name": "push",
+     "line": 6,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pull",
+     "line": 7,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "SyncError",
+     "line": 10,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "HTTPTransport",
+     "line": 26,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 31,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "check",
+     "line": 42,
+     "depth": 1,
+     "doc": "Checks reachability (no auth) and then the token (an empty pull page)."
+    },
+    {
+     "kind": "func",
+     "name": "push",
+     "line": 47,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pull",
+     "line": 55,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "authorized",
+     "line": 63,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "send",
+     "line": 70,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\n\n/// How the sync engine talks to the server. The HTTP implementation is below;\n/// tests use a fake.\nprotocol SyncTransport: Sendable {\n    func push(_ changes: Changes) async throws -> PushResult\n    func pull(since cursor: Int64, limit: Int) async throws -> PullResult\n}\n\nenum SyncError: LocalizedError {\n    case notConfigured\n    case invalidURL\n    case http(status: Int, message: String)\n    case badResponse\n\n    var errorDescription: String? {\n        switch self {\n        case .notConfigured: \"Server address or token not set.\"\n        case .invalidURL: \"Server address isn't a valid https:// URL.\"\n        case .http(let status, let message): \"Server returned \\(status): \\(message)\"\n        case .badResponse: \"Unexpected response from server.\"\n        }\n    }\n}\n\nstruct HTTPTransport: SyncTransport {\n    let baseURL: URL\n    let token: String\n    var session: URLSession = .shared\n\n    init(config: ServerConfig, session: URLSession = .shared) throws {\n        guard config.isComplete else { throw SyncError.notConfigured }\n        guard let url = URL(string: config.url.trimmingCharacters(in: .whitespaces)),\n            url.scheme == \"https\", url.host() != nil\n        else { throw SyncError.invalidURL }\n        self.baseURL = url\n        self.token = config.token\n        self.session = session\n    }\n\n    /// Checks reachability (no auth) and then the token (an empty pull page).\n    func check() async throws {\n        _ = try await send(URLRequest(url: baseURL.appending(path: \"healthz\")))\n        _ = try await pull(since: Int64.max - 1, limit: 1)\n    }\n\n    func push(_ changes: Changes) async throws -> PushResult {\n        var req = URLRequest(url: baseURL.appending(path: \"v1/sync/push\"))\n        req.httpMethod = \"POST\"\n        req.setValue(\"application/json\", forHTTPHeaderField: \"Content-Type\")\n        req.httpBody = try Wire.encoder().encode(changes)\n        return try await Wire.decoder().decode(PushResult.self, from: send(authorized(req)))\n    }\n\n    func pull(since cursor: Int64, limit: Int) async throws -> PullResult {\n        let url = baseURL.appending(path: \"v1/sync/pull\").appending(queryItems: [\n            URLQueryItem(name: \"since\", value: String(cursor)),\n            URLQueryItem(name: \"limit\", value: String(limit)),\n        ])\n        return try await Wire.decoder().decode(PullResult.self, from: send(authorized(URLRequest(url: url))))\n    }\n\n    private func authorized(_ req: URLRequest) -> URLRequest {\n        var req = req\n        req.setValue(\"Bearer \\(token)\", forHTTPHeaderField: \"Authorization\")\n        req.timeoutInterval = 20\n        return req\n    }\n\n    private func send(_ req: URLRequest) async throws -> Data {\n        let (data, response) = try await session.data(for: req)\n        guard let http = response as? HTTPURLResponse else { throw SyncError.badResponse }\n        guard http.statusCode == 200 else {\n            let message = (try? JSONDecoder().decode([String: String].self, from: data))?[\"error\"]\n            throw SyncError.http(status: http.statusCode, message: message ?? \"no details\")\n        }\n        return data\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Sync/ServerConfig.swift",
+   "group": "ios-data",
+   "lang": "swift",
+   "lines": 54,
+   "note": "Server URL in UserDefaults, API token in the Keychain.",
+   "summary": "Where the server is and how to authenticate. The URL lives in\nUserDefaults; the token lives in the Keychain.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "ServerConfig",
+     "line": 6,
+     "depth": 0,
+     "doc": "Where the server is and how to authenticate. The URL lives in\nUserDefaults; the token lives in the Keychain."
+    },
+    {
+     "kind": "struct",
+     "name": "ServerConfigStore",
+     "line": 15,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "load",
+     "line": 19,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "save",
+     "line": 25,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "readToken",
+     "line": 35,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "writeToken",
+     "line": 46,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport Security\n\n/// Where the server is and how to authenticate. The URL lives in\n/// UserDefaults; the token lives in the Keychain.\nstruct ServerConfig: Equatable, Sendable {\n    var url: String\n    var token: String\n\n    var isComplete: Bool {\n        !url.trimmingCharacters(in: .whitespaces).isEmpty && !token.isEmpty\n    }\n}\n\nstruct ServerConfigStore: Sendable {\n    private static let urlKey = \"server.url\"\n    private static let keychainService = \"dev.coach.api-token\"\n\n    func load() -> ServerConfig {\n        ServerConfig(\n            url: UserDefaults.standard.string(forKey: Self.urlKey) ?? \"\",\n            token: Self.readToken() ?? \"\")\n    }\n\n    func save(_ config: ServerConfig) {\n        UserDefaults.standard.set(config.url.trimmingCharacters(in: .whitespaces), forKey: Self.urlKey)\n        Self.writeToken(config.token.trimmingCharacters(in: .whitespacesAndNewlines))\n    }\n\n    private static var baseQuery: [String: Any] {\n        [kSecClass as String: kSecClassGenericPassword,\n         kSecAttrService as String: keychainService]\n    }\n\n    private static func readToken() -> String? {\n        var query = baseQuery\n        query[kSecReturnData as String] = true\n        query[kSecMatchLimit as String] = kSecMatchLimitOne\n        var item: CFTypeRef?\n        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,\n            let data = item as? Data\n        else { return nil }\n        return String(data: data, encoding: .utf8)\n    }\n\n    private static func writeToken(_ token: String) {\n        SecItemDelete(baseQuery as CFDictionary)\n        guard !token.isEmpty else { return }\n        var query = baseQuery\n        query[kSecValueData as String] = Data(token.utf8)\n        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock\n        SecItemAdd(query as CFDictionary, nil)\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/App/CoachApp.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 22,
+   "note": "App entry point.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "CoachApp",
+     "line": 4,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 7,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\n@main\nstruct CoachApp: App {\n    @State private var model: AppModel\n\n    init() {\n        Prefs.registerDefaults()\n        do {\n            _model = State(initialValue: AppModel(database: try AppDatabase.onDisk()))\n        } catch {\n            fatalError(\"Couldn't open the database: \\(error)\")\n        }\n    }\n\n    var body: some Scene {\n        WindowGroup {\n            RootView()\n                .environment(model)\n        }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/App/AppModel.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 164,
+   "note": "Observable app state. Observes the active fast, schedules debounced syncs, exposes fasting actions.",
+   "summary": "App-wide state the views read: the running fast, sync status and the\nselected tab. Writes go through the repository; the view state updates\nfrom database observation, so changes that arrive by sync show up too.",
+   "symbols": [
+    {
+     "kind": "class",
+     "name": "AppModel",
+     "line": 10,
+     "depth": 0,
+     "doc": "App-wide state the views read: the running fast, sync status and the\nselected tab. Writes go through the repository; the view state updates\nfrom database observation, so changes that arrive by sync show up too."
+    },
+    {
+     "kind": "enum",
+     "name": "Tab",
+     "line": 11,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "SyncStatus",
+     "line": 17,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 43,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "start",
+     "line": 60,
+     "depth": 1,
+     "doc": "Starts observing the database. Call once, from the root view's task."
+    },
+    {
+     "kind": "func",
+     "name": "startFast",
+     "line": 78,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "endFast",
+     "line": 85,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "setGoal",
+     "line": 90,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "alertPreferencesChanged",
+     "line": 95,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "perform",
+     "line": 99,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "updateServer",
+     "line": 111,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "testConnection",
+     "line": 119,
+     "depth": 1,
+     "doc": "Checks the address and token without syncing."
+    },
+    {
+     "kind": "func",
+     "name": "scheduleSync",
+     "line": 130,
+     "depth": 1,
+     "doc": "Debounced so a burst of edits becomes one sync."
+    },
+    {
+     "kind": "func",
+     "name": "syncNow",
+     "line": 139,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\nimport Observation\n\n/// App-wide state the views read: the running fast, sync status and the\n/// selected tab. Writes go through the repository; the view state updates\n/// from database observation, so changes that arrive by sync show up too.\n@MainActor\n@Observable\nfinal class AppModel {\n    enum Tab: String, CaseIterable, Identifiable {\n        case today, train, fuel, body\n        var id: String { rawValue }\n        var title: String { rawValue.uppercased() }\n    }\n\n    enum SyncStatus: Equatable {\n        case notConfigured\n        case idle\n        case syncing\n        case ok(Date)\n        case failed(String)\n    }\n\n    var tab: Tab = .today\n    private(set) var activeFast: Fast?\n    private(set) var syncStatus: SyncStatus = .idle\n    private(set) var lastError: String?\n    private(set) var server: ServerConfig\n\n    let database: AppDatabase\n    private let fasts: FastRepository\n    private let engine: SyncEngine\n    private let configStore: ServerConfigStore\n    private let notifications: FastNotifications\n    private let makeTransport: @Sendable (ServerConfig) throws -> any SyncTransport\n\n    private var started = false\n    private var syncing = false\n    private var syncAgain = false\n    private var pendingSync: Task<Void, Never>?\n\n    init(\n        database: AppDatabase,\n        configStore: ServerConfigStore = ServerConfigStore(),\n        notifications: FastNotifications = FastNotifications(),\n        makeTransport: @escaping @Sendable (ServerConfig) throws -> any SyncTransport = { try HTTPTransport(config: $0) }\n    ) {\n        self.database = database\n        self.fasts = FastRepository(database: database)\n        self.engine = SyncEngine(database: database)\n        self.configStore = configStore\n        self.notifications = notifications\n        self.makeTransport = makeTransport\n        self.server = configStore.load()\n        if !server.isComplete { syncStatus = .notConfigured }\n    }\n\n    /// Starts observing the database. Call once, from the root view's task.\n    func start() async {\n        guard !started else { return }\n        started = true\n        scheduleSync(after: .zero)\n\n        let observation = ValueObservation.tracking { db in try Fast.active(db) }\n        do {\n            for try await fast in observation.values(in: database.writer) {\n                activeFast = fast\n                await notifications.reschedule(for: fast)\n            }\n        } catch {\n            lastError = \"Database observation failed: \\(error.localizedDescription)\"\n        }\n    }\n\n    // MARK: Fasting\n\n    func startFast(goalHours: Int) {\n        perform {\n            try fasts.start(goalSeconds: goalHours * 3600)\n            Task { await notifications.requestAuthorization() }\n        }\n    }\n\n    func endFast() {\n        guard let id = activeFast?.id else { return }\n        perform { try fasts.end(id) }\n    }\n\n    func setGoal(hours: Int) {\n        guard let id = activeFast?.id else { return }\n        perform { try fasts.setGoal(id, seconds: hours * 3600) }\n    }\n\n    func alertPreferencesChanged() {\n        Task { await notifications.reschedule(for: activeFast) }\n    }\n\n    private func perform(_ change: () throws -> Void) {\n        do {\n            try change()\n            lastError = nil\n            scheduleSync()\n        } catch {\n            lastError = error.localizedDescription\n        }\n    }\n\n    // MARK: Sync\n\n    func updateServer(_ config: ServerConfig) {\n        configStore.save(config)\n        server = configStore.load()\n        syncStatus = server.isComplete ? .idle : .notConfigured\n        scheduleSync(after: .zero)\n    }\n\n    /// Checks the address and token without syncing.\n    func testConnection() async -> String {\n        do {\n            let transport = try HTTPTransport(config: server)\n            try await transport.check()\n            return \"LINK OK\"\n        } catch {\n            return error.localizedDescription\n        }\n    }\n\n    /// Debounced so a burst of edits becomes one sync.\n    func scheduleSync(after delay: Duration = .seconds(1)) {\n        pendingSync?.cancel()\n        pendingSync = Task {\n            try? await Task.sleep(for: delay)\n            guard !Task.isCancelled else { return }\n            await syncNow()\n        }\n    }\n\n    func syncNow() async {\n        guard server.isComplete else {\n            syncStatus = .notConfigured\n            return\n        }\n        // One sync at a time; a request during a sync runs right after it.\n        guard !syncing else {\n            syncAgain = true\n            return\n        }\n        syncing = true\n        defer { syncing = false }\n\n        repeat {\n            syncAgain = false\n            syncStatus = .syncing\n            do {\n                let transport = try makeTransport(server)\n                _ = try await engine.run(transport)\n                syncStatus = .ok(.now)\n            } catch {\n                syncStatus = .failed(error.localizedDescription)\n            }\n        } while syncAgain\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/App/FastNotifications.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 67,
+   "note": "Fasting alerts, rescheduled idempotently from the current state.",
+   "summary": "Local notifications for the running fast. Rescheduling is idempotent:\nit clears every fast alert and schedules fresh ones from the current state,\nso it's safe to call after any change, including ones that arrive by sync.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "FastNotifications",
+     "line": 7,
+     "depth": 0,
+     "doc": "Local notifications for the running fast. Rescheduling is idempotent:\nit clears every fast alert and schedules fresh ones from the current state,\nso it's safe to call after any change, including ones that arrive by sync."
+    },
+    {
+     "kind": "func",
+     "name": "requestAuthorization",
+     "line": 10,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "reschedule",
+     "line": 15,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "Alert",
+     "line": 35,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "alerts",
+     "line": 43,
+     "depth": 1,
+     "doc": "The alerts a fast should have, given the user's preferences."
+    }
+   ],
+   "source": "import Foundation\nimport UserNotifications\n\n/// Local notifications for the running fast. Rescheduling is idempotent:\n/// it clears every fast alert and schedules fresh ones from the current state,\n/// so it's safe to call after any change, including ones that arrive by sync.\nstruct FastNotifications: Sendable {\n    private static let prefix = \"fast.\"\n\n    func requestAuthorization() async {\n        _ = try? await UNUserNotificationCenter.current()\n            .requestAuthorization(options: [.alert, .sound, .badge])\n    }\n\n    func reschedule(for fast: Fast?, now: Date = .now) async {\n        let center = UNUserNotificationCenter.current()\n        let existing = await center.pendingNotificationRequests()\n            .map(\\.identifier)\n            .filter { $0.hasPrefix(Self.prefix) }\n        center.removePendingNotificationRequests(withIdentifiers: existing)\n\n        guard let fast, fast.isActive else { return }\n        for alert in Self.alerts(for: fast, defaults: .standard) where alert.date > now {\n            let content = UNMutableNotificationContent()\n            content.title = alert.title\n            content.body = alert.body\n            content.sound = .default\n            let trigger = UNTimeIntervalNotificationTrigger(\n                timeInterval: alert.date.timeIntervalSince(now), repeats: false)\n            try? await center.add(\n                UNNotificationRequest(identifier: Self.prefix + alert.id, content: content, trigger: trigger))\n        }\n    }\n\n    struct Alert: Equatable {\n        var id: String\n        var date: Date\n        var title: String\n        var body: String\n    }\n\n    /// The alerts a fast should have, given the user's preferences.\n    static func alerts(for fast: Fast, defaults: UserDefaults) -> [Alert] {\n        var out: [Alert] = []\n        let goal = fast.goalDate\n        let goalText = Format.goal(fast.goalSeconds)\n\n        if defaults.bool(forKey: Prefs.alertGoal) {\n            out.append(Alert(\n                id: \"goal\", date: goal, title: \"FAST // GOAL REACHED\",\n                body: \"\\(goalText) complete. End the fast whenever you're ready.\"))\n        }\n        if defaults.bool(forKey: Prefs.alertHourBefore), fast.goalSeconds > 3600 {\n            out.append(Alert(\n                id: \"t-1h\", date: goal.addingTimeInterval(-3600), title: \"FAST // T-01:00\",\n                body: \"One hour to your \\(goalText) goal.\"))\n        }\n        if defaults.bool(forKey: Prefs.alertEvery4h) {\n            for hours in stride(from: 4, to: fast.goalSeconds / 3600, by: 4) {\n                out.append(Alert(\n                    id: \"h\\(hours)\", date: fast.startedAt.addingTimeInterval(TimeInterval(hours * 3600)),\n                    title: \"FAST // \\(hours)H\", body: \"\\(hours) hours in. Goal \\(goalText).\"))\n            }\n        }\n        return out\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/App/RootView.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 69,
+   "note": "Grid, tabs, scanlines and the NEON tab bar.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "RootView",
+     "line": 3,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "NeonTabBar",
+     "line": 36,
+     "depth": 0,
+     "doc": "Text-only tabs with a glowing top rule on the active one."
+    }
+   ],
+   "source": "import SwiftUI\n\nstruct RootView: View {\n    @Environment(AppModel.self) private var model\n    @Environment(\\.scenePhase) private var scenePhase\n    @AppStorage(Prefs.scanlines) private var scanlines = true\n\n    var body: some View {\n        @Bindable var model = model\n\n        ZStack {\n            GridBackground().ignoresSafeArea()\n            switch model.tab {\n            case .today: TodayView()\n            case .train: ModulePlaceholder(title: \"TRAIN//\", accent: Neon.cycling, milestone: \"Cycling recording and plans arrive in milestones 3\u20134.\")\n            case .fuel: FastView()\n            case .body: ModulePlaceholder(title: \"BODY//\", accent: Neon.breathing, milestone: \"Health import (sleep, HRV, resting HR) arrives in milestone 5.\")\n            }\n        }\n        .safeAreaInset(edge: .bottom, spacing: 0) {\n            NeonTabBar(selection: $model.tab)\n        }\n        .overlay {\n            if scanlines { ScanlineOverlay().ignoresSafeArea() }\n        }\n        .preferredColorScheme(.dark)\n        .tint(Neon.cyan)\n        .task { await model.start() }\n        .onChange(of: scenePhase) { _, phase in\n            if phase == .active { model.scheduleSync(after: .zero) }\n        }\n    }\n}\n\n/// Text-only tabs with a glowing top rule on the active one.\nstruct NeonTabBar: View {\n    @Binding var selection: AppModel.Tab\n\n    var body: some View {\n        HStack(spacing: 0) {\n            ForEach(AppModel.Tab.allCases) { tab in\n                let active = tab == selection\n                Button {\n                    selection = tab\n                } label: {\n                    Text(tab.title)\n                        .font(NeonFont.display(12, relativeTo: .caption))\n                        .tracking(2)\n                        .foregroundStyle(active ? Neon.cyan : Neon.muted)\n                        .neonGlow(active ? Neon.cyan : .clear, radius: 5)\n                        .frame(maxWidth: .infinity, minHeight: 52)\n                        .overlay(alignment: .top) {\n                            Rectangle()\n                                .fill(active ? Neon.cyan : .clear)\n                                .frame(height: 2)\n                                .shadow(color: active ? Neon.cyan : .clear, radius: 4)\n                        }\n                        .contentShape(Rectangle())\n                }\n                .buttonStyle(.plain)\n                .accessibilityAddTraits(active ? .isSelected : [])\n            }\n        }\n        .background(Neon.background.ignoresSafeArea(edges: .bottom))\n        .overlay(alignment: .top) {\n            Rectangle().fill(Neon.cyan.opacity(0.4)).frame(height: 1)\n        }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Features/Today/TodayView.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 162,
+   "note": "The Today tab: header with sync badge, fasting card, placeholders for vitals and the next workout.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "TodayView",
+     "line": 3,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "SyncBadge",
+     "line": 79,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "FastCard",
+     "line": 100,
+     "depth": 0,
+     "doc": "The fasting summary on Today. Tapping DETAIL jumps to the Fuel tab."
+    },
+    {
+     "kind": "func",
+     "name": "active",
+     "line": 116,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\nstruct TodayView: View {\n    @Environment(AppModel.self) private var model\n    @State private var showSettings = false\n\n    var body: some View {\n        ScrollView {\n            VStack(spacing: 12) {\n                header\n                FastCard()\n                vitals\n                nextWorkout\n            }\n            .padding(.horizontal, 16)\n            .padding(.vertical, 20)\n        }\n        .scrollIndicators(.hidden)\n        .sheet(isPresented: $showSettings) { SettingsView() }\n    }\n\n    private var header: some View {\n        HStack(alignment: .center) {\n            Text(\"COACH//OS\")\n                .font(NeonFont.display(22, relativeTo: .title2))\n                .tracking(4)\n                .foregroundStyle(Neon.magenta)\n                .neonGlow(Neon.magenta, radius: 9)\n                .accessibilityAddTraits(.isHeader)\n            Spacer()\n            VStack(alignment: .trailing, spacing: 2) {\n                Text(Format.dayDate(.now))\n                    .foregroundStyle(Neon.muted)\n                SyncBadge(status: model.syncStatus)\n            }\n            .font(NeonFont.mono(11, relativeTo: .caption))\n            Button {\n                showSettings = true\n            } label: {\n                Image(systemName: \"gearshape\")\n                    .font(.system(size: 17, weight: .semibold))\n                    .foregroundStyle(Neon.text)\n                    .frame(width: 44, height: 44)\n                    .background(ChamferShape(cut: 9).fill(Neon.panel))\n                    .overlay(ChamferShape(cut: 9).strokeBorder(Neon.edge, lineWidth: 1))\n            }\n            .buttonStyle(.plain)\n            .accessibilityLabel(\"Settings\")\n        }\n    }\n\n    // Placeholders until HealthKit import (milestone 5) and plans (milestone 4).\n    private var vitals: some View {\n        NeonPanel {\n            PanelTitle(text: \"VITALS\")\n            DataRow(label: \"RESTING HR\", value: \"--\", color: Neon.heart)\n            DataRow(label: \"HRV\", value: \"--\", color: Neon.breathing)\n            DataRow(label: \"SLEEP\", value: \"--\", color: Neon.mobility)\n            Text(\"HEALTH LINK // NOT YET CONNECTED\")\n                .font(NeonFont.mono(11, relativeTo: .caption))\n                .foregroundStyle(Neon.muted)\n        }\n    }\n\n    private var nextWorkout: some View {\n        NeonPanel(accent: Neon.cycling.opacity(0.5)) {\n            PanelTitle(text: \"NEXT // QUEUE\", color: Neon.cycling)\n            Text(\"NO WORKOUT SCHEDULED\")\n                .font(NeonFont.display(18, relativeTo: .headline))\n                .tracking(1)\n                .foregroundStyle(Neon.text)\n            Text(\"Plans pushed from the desktop will appear here.\")\n                .font(NeonFont.mono(12, relativeTo: .footnote))\n                .foregroundStyle(Neon.muted)\n        }\n    }\n}\n\nstruct SyncBadge: View {\n    var status: AppModel.SyncStatus\n\n    var body: some View {\n        let (text, color): (String, Color) = switch status {\n        case .notConfigured: (\"NO LINK CFG\", Neon.amber)\n        case .idle: (\"LINK IDLE\", Neon.muted)\n        case .syncing: (\"SYNCING\", Neon.cyan)\n        case .ok: (\"LINK OK\", Neon.mint)\n        case .failed: (\"OFFLINE\", Neon.heart)\n        }\n        HStack(spacing: 5) {\n            Rectangle().fill(color).frame(width: 6, height: 6).neonGlow(color, radius: 3)\n            Text(text).foregroundStyle(color)\n        }\n        .accessibilityElement(children: .combine)\n        .accessibilityLabel(\"Sync status: \\(text.lowercased())\")\n    }\n}\n\n/// The fasting summary on Today. Tapping DETAIL jumps to the Fuel tab.\nstruct FastCard: View {\n    @Environment(AppModel.self) private var model\n    @AppStorage(Prefs.defaultGoalHours) private var defaultGoalHours = 16\n\n    var body: some View {\n        NeonPanel(accent: Neon.fasting) {\n            if let fast = model.activeFast {\n                TimelineView(.periodic(from: .now, by: 1)) { context in\n                    active(fast, now: context.date)\n                }\n            } else {\n                idle\n            }\n        }\n    }\n\n    private func active(_ fast: Fast, now: Date) -> some View {\n        let elapsed = fast.elapsed(at: now)\n        let goal = TimeInterval(fast.goalSeconds)\n        let hours = max(1, min(fast.goalSeconds / 3600, 24))\n        return VStack(alignment: .leading, spacing: 8) {\n            PanelTitle(text: \"FAST // ACTIVE\", color: Neon.fasting)\n            HStack(alignment: .firstTextBaseline) {\n                Text(Format.hoursMinutes(elapsed))\n                    .font(NeonFont.readout(44))\n                    .foregroundStyle(Neon.fasting)\n                    .neonGlow(Neon.fasting, radius: 10)\n                Text(\"/ \" + Format.hoursMinutes(goal))\n                    .font(NeonFont.mono(16))\n                    .foregroundStyle(Neon.muted)\n                Spacer()\n                Text(Format.countdown(goal - elapsed))\n                    .font(NeonFont.mono(12))\n                    .foregroundStyle(Neon.text)\n            }\n            .accessibilityElement(children: .combine)\n            SegmentedBar(count: hours, value: elapsed / goal * Double(hours), color: Neon.fasting)\n            HStack(spacing: 10) {\n                Button(\"DETAIL\") { model.tab = .fuel }\n                    .buttonStyle(.neon(.outline, Neon.fasting, height: 44))\n                Button(\"END FAST\") { model.endFast() }\n                    .buttonStyle(.neon(.filled, Neon.fasting, height: 44))\n            }\n        }\n    }\n\n    private var idle: some View {\n        VStack(alignment: .leading, spacing: 8) {\n            PanelTitle(text: \"FAST // IDLE\", color: Neon.fasting)\n            HStack(alignment: .firstTextBaseline) {\n                Text(\"--:--\")\n                    .font(NeonFont.readout(44))\n                    .foregroundStyle(Neon.muted)\n                Spacer()\n                Text(\"GOAL \\(defaultGoalHours)H\")\n                    .font(NeonFont.mono(12))\n                    .foregroundStyle(Neon.text)\n            }\n            Button(\"START FAST\") { model.startFast(goalHours: defaultGoalHours) }\n                .buttonStyle(.neon(.filled, Neon.fasting))\n        }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Features/Fast/FastView.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 168,
+   "note": "The Fuel tab: octagon timer, hour bar, goal adjustment, alert toggles.",
+   "summary": "The Fuel tab: fasting detail with the octagon timer, goal and alerts.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "FastView",
+     "line": 4,
+     "depth": 0,
+     "doc": "The Fuel tab: fasting detail with the octagon timer, goal and alerts."
+    },
+    {
+     "kind": "func",
+     "name": "timer",
+     "line": 59,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "hourBar",
+     "line": 93,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "changeGoal",
+     "line": 137,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\n/// The Fuel tab: fasting detail with the octagon timer, goal and alerts.\nstruct FastView: View {\n    @Environment(AppModel.self) private var model\n    @AppStorage(Prefs.defaultGoalHours) private var defaultGoalHours = 16\n    @AppStorage(Prefs.alertGoal) private var alertGoal = true\n    @AppStorage(Prefs.alertHourBefore) private var alertHourBefore = true\n    @AppStorage(Prefs.alertEvery4h) private var alertEvery4h = false\n    @State private var confirmEnd = false\n\n    private var goalHours: Int {\n        model.activeFast.map { $0.goalSeconds / 3600 } ?? defaultGoalHours\n    }\n\n    var body: some View {\n        ScrollView {\n            VStack(spacing: 16) {\n                HStack {\n                    Text(\"FAST//\\(goalHours):\\(max(0, 24 - goalHours))\")\n                        .font(NeonFont.display(22, relativeTo: .title2))\n                        .tracking(4)\n                        .foregroundStyle(Neon.fasting)\n                        .neonGlow(Neon.fasting, radius: 9)\n                        .accessibilityAddTraits(.isHeader)\n                    Spacer()\n                    Text(\"PROTOCOL\")\n                        .font(NeonFont.mono(11, relativeTo: .caption))\n                        .foregroundStyle(Neon.muted)\n                }\n\n                TimelineView(.periodic(from: .now, by: 1)) { context in\n                    VStack(spacing: 16) {\n                        timer(now: context.date)\n                        hourBar(now: context.date)\n                    }\n                }\n\n                details\n                alerts\n                mainButton\n                if let error = model.lastError {\n                    Text(error)\n                        .font(NeonFont.mono(12))\n                        .foregroundStyle(Neon.heart)\n                }\n            }\n            .padding(.horizontal, 16)\n            .padding(.vertical, 20)\n        }\n        .scrollIndicators(.hidden)\n        .confirmationDialog(\"End this fast?\", isPresented: $confirmEnd, titleVisibility: .visible) {\n            Button(\"End fast\", role: .destructive) { model.endFast() }\n        }\n    }\n\n    // MARK: Timer\n\n    private func timer(now: Date) -> some View {\n        let fast = model.activeFast\n        let elapsed = fast?.elapsed(at: now) ?? 0\n        let goal = TimeInterval(goalHours * 3600)\n        let percent = fast == nil ? 0 : Int(min(elapsed / goal, 9.99) * 100)\n\n        return VStack(spacing: 8) {\n            Text(fast == nil ? \"STANDBY\" : \"ELAPSED\")\n                .font(NeonFont.display(11, relativeTo: .caption))\n                .tracking(4)\n                .foregroundStyle(Neon.muted)\n            Text(Format.hoursMinutesSeconds(elapsed))\n                .font(NeonFont.readout(48))\n                .foregroundStyle(fast == nil ? Neon.muted : Neon.fasting)\n                .neonGlow(fast == nil ? .clear : Neon.fasting, radius: 12)\n                .minimumScaleFactor(0.6)\n            Text(fast == nil ? \"GOAL \\(Format.goal(Int(goal)))\" : Format.countdown(goal - elapsed) + \" TO GOAL\")\n                .font(NeonFont.mono(14))\n                .foregroundStyle(Neon.text)\n            Text(\"\\(percent)% COMPLETE\")\n                .font(NeonFont.mono(11, relativeTo: .caption))\n                .tracking(2)\n                .foregroundStyle(Neon.fasting)\n                .padding(.horizontal, 10)\n                .padding(.vertical, 3)\n                .overlay(Rectangle().strokeBorder(Neon.fasting.opacity(0.5), lineWidth: 1))\n        }\n        .frame(width: 270, height: 270)\n        .background(OctagonShape().fill(Neon.panel))\n        .overlay(OctagonShape().strokeBorder(Neon.fasting, lineWidth: 1.5))\n        .shadow(color: Neon.fasting.opacity(0.35), radius: 12)\n        .accessibilityElement(children: .combine)\n    }\n\n    private func hourBar(now: Date) -> some View {\n        let elapsedHours = (model.activeFast?.elapsed(at: now) ?? 0) / 3600\n        let segments = max(1, min(goalHours, 36))\n        return VStack(spacing: 6) {\n            SegmentedBar(\n                count: segments, value: elapsedHours * Double(segments) / Double(goalHours),\n                color: Neon.fasting, height: 16, spacing: 3)\n            HStack {\n                ForEach(Array(stride(from: 0, through: goalHours, by: max(1, goalHours / 4))), id: \\.self) { h in\n                    Text(\"\\(h)H\")\n                        .foregroundStyle(h == goalHours ? Neon.fasting : Neon.muted)\n                    if h < goalHours { Spacer() }\n                }\n            }\n            .font(NeonFont.mono(11, relativeTo: .caption))\n            .accessibilityHidden(true)\n        }\n    }\n\n    // MARK: Details\n\n    private var details: some View {\n        NeonPanel {\n            if let fast = model.activeFast {\n                DataRow(label: \"STARTED\", value: Format.dayTime(fast.startedAt))\n                DataRow(label: \"GOAL\", value: Format.goal(fast.goalSeconds), color: Neon.fasting)\n                DataRow(label: \"ENDS\", value: Format.dayTime(fast.goalDate))\n            } else {\n                DataRow(label: \"STATUS\", value: \"NO ACTIVE FAST\")\n                DataRow(label: \"GOAL\", value: \"\\(defaultGoalHours)H\", color: Neon.fasting)\n            }\n            HStack(spacing: 10) {\n                Button(\"-1H\") { changeGoal(by: -1) }\n                    .buttonStyle(.neon(.outline, Neon.fasting, height: 44))\n                    .disabled(goalHours <= 1)\n                Button(\"+1H\") { changeGoal(by: 1) }\n                    .buttonStyle(.neon(.outline, Neon.fasting, height: 44))\n                    .disabled(goalHours >= 72)\n            }\n            .accessibilityElement(children: .contain)\n            .accessibilityLabel(\"Adjust goal\")\n        }\n    }\n\n    private func changeGoal(by delta: Int) {\n        let hours = min(72, max(1, goalHours + delta))\n        if model.activeFast != nil {\n            model.setGoal(hours: hours)\n        } else {\n            defaultGoalHours = hours\n        }\n    }\n\n    private var alerts: some View {\n        NeonPanel(accent: Neon.fasting) {\n            PanelTitle(text: \"ALERTS\", color: Neon.fasting)\n            Toggle(\"> GOAL REACHED\", isOn: $alertGoal)\n            Toggle(\"> T-01:00\", isOn: $alertHourBefore)\n            Toggle(\"> EVERY 4H\", isOn: $alertEvery4h)\n        }\n        .toggleStyle(NeonToggleStyle(color: Neon.fasting))\n        .onChange(of: [alertGoal, alertHourBefore, alertEvery4h]) {\n            model.alertPreferencesChanged()\n        }\n    }\n\n    @ViewBuilder private var mainButton: some View {\n        if model.activeFast != nil {\n            Button(\"END FAST\") { confirmEnd = true }\n                .buttonStyle(.neon(.filled, Neon.fasting, height: 54))\n        } else {\n            Button(\"START FAST\") { model.startFast(goalHours: defaultGoalHours) }\n                .buttonStyle(.neon(.filled, Neon.fasting, height: 54))\n        }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Features/Settings/SettingsView.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 139,
+   "note": "Server address and token, connection test, display preferences.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "SettingsView",
+     "line": 3,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "save",
+     "line": 135,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\nstruct SettingsView: View {\n    @Environment(AppModel.self) private var model\n    @Environment(\\.dismiss) private var dismiss\n    @AppStorage(Prefs.scanlines) private var scanlines = true\n    @AppStorage(Prefs.units) private var units = Units.metric.rawValue\n\n    @State private var url = \"\"\n    @State private var token = \"\"\n    @State private var checkResult: String?\n    @State private var checking = false\n\n    var body: some View {\n        ZStack {\n            GridBackground().ignoresSafeArea()\n            ScrollView {\n                VStack(spacing: 14) {\n                    HStack {\n                        Text(\"SYS//CONFIG\")\n                            .font(NeonFont.display(22, relativeTo: .title2))\n                            .tracking(4)\n                            .foregroundStyle(Neon.cyan)\n                            .neonGlow(Neon.cyan, radius: 9)\n                            .accessibilityAddTraits(.isHeader)\n                        Spacer()\n                        Button(\"DONE\") { save(); dismiss() }\n                            .buttonStyle(.neon(.outline, Neon.cyan, height: 44))\n                            .frame(width: 100)\n                    }\n                    server\n                    display\n                    about\n                }\n                .padding(16)\n            }\n            .scrollIndicators(.hidden)\n            if scanlines { ScanlineOverlay().ignoresSafeArea() }\n        }\n        .preferredColorScheme(.dark)\n        .onAppear {\n            url = model.server.url\n            token = model.server.token\n        }\n        .onDisappear(perform: save)\n    }\n\n    private var server: some View {\n        NeonPanel(accent: Neon.cyan) {\n            PanelTitle(text: \"UPLINK\", color: Neon.cyan)\n            Text(\"> SERVER ADDRESS\")\n                .font(NeonFont.mono(12, relativeTo: .footnote))\n                .foregroundStyle(Neon.muted)\n            TextField(\"https://coach.your-tailnet.ts.net\", text: $url)\n                .textFieldStyle(NeonFieldStyle())\n                .keyboardType(.URL)\n                .textInputAutocapitalization(.never)\n                .autocorrectionDisabled()\n                .textContentType(.URL)\n            Text(\"> API TOKEN\")\n                .font(NeonFont.mono(12, relativeTo: .footnote))\n                .foregroundStyle(Neon.muted)\n            SecureField(\"COACH_API_TOKEN\", text: $token)\n                .textFieldStyle(NeonFieldStyle())\n                .textInputAutocapitalization(.never)\n                .autocorrectionDisabled()\n\n            HStack(spacing: 10) {\n                Button(checking ? \"TESTING\u2026\" : \"TEST LINK\") {\n                    save()\n                    checking = true\n                    Task {\n                        checkResult = await model.testConnection()\n                        checking = false\n                    }\n                }\n                .buttonStyle(.neon(.outline, Neon.cyan, height: 44))\n                .disabled(checking)\n                Button(\"SYNC NOW\") {\n                    save()\n                    Task { await model.syncNow() }\n                }\n                .buttonStyle(.neon(.filled, Neon.cyan, height: 44))\n            }\n            if let checkResult {\n                Text(checkResult)\n                    .font(NeonFont.mono(12, relativeTo: .footnote))\n                    .foregroundStyle(checkResult == \"LINK OK\" ? Neon.mint : Neon.heart)\n            }\n            HStack {\n                SyncBadge(status: model.syncStatus)\n                Spacer()\n                if case .ok(let date) = model.syncStatus {\n                    Text(\"LAST \" + Format.dayTime(date))\n                        .foregroundStyle(Neon.muted)\n                }\n            }\n            .font(NeonFont.mono(11, relativeTo: .caption))\n            if case .failed(let message) = model.syncStatus {\n                Text(message)\n                    .font(NeonFont.mono(12, relativeTo: .footnote))\n                    .foregroundStyle(Neon.heart)\n            }\n        }\n    }\n\n    private var display: some View {\n        NeonPanel {\n            PanelTitle(text: \"DISPLAY\")\n            Toggle(\"> SCANLINES\", isOn: $scanlines)\n                .toggleStyle(NeonToggleStyle(color: Neon.magenta))\n            Text(\"> UNITS\")\n                .font(NeonFont.mono(13))\n                .foregroundStyle(Neon.text)\n            HStack(spacing: 10) {\n                ForEach(Units.allCases) { option in\n                    Button(option.rawValue) { units = option.rawValue }\n                        .buttonStyle(.neon(units == option.rawValue ? .filled : .outline, Neon.magenta, height: 44))\n                        .accessibilityAddTraits(units == option.rawValue ? .isSelected : [])\n                }\n            }\n        }\n    }\n\n    private var about: some View {\n        NeonPanel {\n            PanelTitle(text: \"SYSTEM\")\n            DataRow(\n                label: \"VERSION\",\n                value: Bundle.main.object(forInfoDictionaryKey: \"CFBundleShortVersionString\") as? String ?? \"?\")\n            DataRow(label: \"STORAGE\", value: \"LOCAL-FIRST\")\n        }\n    }\n\n    private func save() {\n        let config = ServerConfig(url: url, token: token)\n        if config != model.server { model.updateServer(config) }\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Features/Placeholder/ModulePlaceholder.swift",
+   "group": "ios-app",
+   "lang": "swift",
+   "lines": 28,
+   "note": "Stand-in for tabs not built yet.",
+   "summary": "Stand-in for tabs whose milestone hasn't been built yet.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "ModulePlaceholder",
+     "line": 4,
+     "depth": 0,
+     "doc": "Stand-in for tabs whose milestone hasn't been built yet."
+    }
+   ],
+   "source": "import SwiftUI\n\n/// Stand-in for tabs whose milestone hasn't been built yet.\nstruct ModulePlaceholder: View {\n    var title: String\n    var accent: Color\n    var milestone: String\n\n    var body: some View {\n        VStack(alignment: .leading, spacing: 16) {\n            Text(title)\n                .font(NeonFont.display(22, relativeTo: .title2))\n                .tracking(4)\n                .foregroundStyle(accent)\n                .neonGlow(accent, radius: 9)\n                .accessibilityAddTraits(.isHeader)\n            NeonPanel(accent: accent.opacity(0.6)) {\n                PanelTitle(text: \"MODULE // OFFLINE\", color: accent)\n                Text(milestone)\n                    .font(NeonFont.mono(13))\n                    .foregroundStyle(Neon.text)\n            }\n            Spacer()\n        }\n        .padding(.horizontal, 16)\n        .padding(.vertical, 20)\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Theme/Theme.swift",
+   "group": "ios-theme",
+   "lang": "swift",
+   "lines": 90,
+   "note": "Color tokens, domain accents, fonts and preference keys.",
+   "summary": "Color tokens for the NEON//OS look.",
+   "symbols": [
+    {
+     "kind": "enum",
+     "name": "Neon",
+     "line": 4,
+     "depth": 0,
+     "doc": "Color tokens for the NEON//OS look."
+    },
+    {
+     "kind": "extension",
+     "name": "Neon",
+     "line": 23,
+     "depth": 0,
+     "doc": "Accent per domain, so a color always means the same thing."
+    },
+    {
+     "kind": "extension",
+     "name": "Color",
+     "line": 32,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 33,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "NeonFont",
+     "line": 44,
+     "depth": 0,
+     "doc": "Chakra Petch for titles and controls; Share Tech Mono for data."
+    },
+    {
+     "kind": "enum",
+     "name": "Weight",
+     "line": 45,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "display",
+     "line": 51,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "mono",
+     "line": 55,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "readout",
+     "line": 60,
+     "depth": 1,
+     "doc": "Large readouts that shouldn't grow with Dynamic Type."
+    },
+    {
+     "kind": "enum",
+     "name": "Prefs",
+     "line": 66,
+     "depth": 0,
+     "doc": "UserDefaults keys for display and alert preferences."
+    },
+    {
+     "kind": "func",
+     "name": "registerDefaults",
+     "line": 74,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "Units",
+     "line": 87,
+     "depth": 0,
+     "doc": "Stored in SI internally; this is display only."
+    }
+   ],
+   "source": "import SwiftUI\n\n/// Color tokens for the NEON//OS look.\nenum Neon {\n    static let background = Color(hex: 0x08050F)\n    static let panel = Color(hex: 0x120D29)\n    static let buttonInset = Color(hex: 0x140A1C)\n    static let edge = Color(hex: 0x2A1F45)\n    static let grid = Color(hex: 0x401A73, opacity: 0.35)\n    static let text = Color(hex: 0xD9F2FF)\n    static let muted = Color(hex: 0x737FA6)\n\n    static let cyan = Color(hex: 0x00F2FF)\n    static let magenta = Color(hex: 0xFF2EBF)\n    static let amber = Color(hex: 0xFFB81A)\n    static let lime = Color(hex: 0xA6FF00)\n    static let violet = Color(hex: 0x9D7BFF)\n    static let mint = Color(hex: 0x3DFFB4)\n    static let heart = Color(hex: 0xFF4D6D)\n}\n\n/// Accent per domain, so a color always means the same thing.\nextension Neon {\n    static let fasting = amber\n    static let cycling = cyan\n    static let lifting = magenta\n    static let running = lime\n    static let mobility = violet\n    static let breathing = mint\n}\n\nextension Color {\n    init(hex: UInt32, opacity: Double = 1) {\n        self.init(\n            .sRGB,\n            red: Double((hex >> 16) & 0xFF) / 255,\n            green: Double((hex >> 8) & 0xFF) / 255,\n            blue: Double(hex & 0xFF) / 255,\n            opacity: opacity)\n    }\n}\n\n/// Chakra Petch for titles and controls; Share Tech Mono for data.\nenum NeonFont {\n    enum Weight: String {\n        case medium = \"ChakraPetch-Medium\"\n        case semibold = \"ChakraPetch-SemiBold\"\n        case bold = \"ChakraPetch-Bold\"\n    }\n\n    static func display(_ size: CGFloat, _ weight: Weight = .bold, relativeTo style: Font.TextStyle = .body) -> Font {\n        .custom(weight.rawValue, size: size, relativeTo: style)\n    }\n\n    static func mono(_ size: CGFloat, relativeTo style: Font.TextStyle = .body) -> Font {\n        .custom(\"ShareTechMono-Regular\", size: size, relativeTo: style)\n    }\n\n    /// Large readouts that shouldn't grow with Dynamic Type.\n    static func readout(_ size: CGFloat) -> Font {\n        .custom(\"ShareTechMono-Regular\", fixedSize: size)\n    }\n}\n\n/// UserDefaults keys for display and alert preferences.\nenum Prefs {\n    static let scanlines = \"display.scanlines\"\n    static let units = \"display.units\"\n    static let defaultGoalHours = \"fast.defaultGoalHours\"\n    static let alertGoal = \"fast.alert.goal\"\n    static let alertHourBefore = \"fast.alert.hourBefore\"\n    static let alertEvery4h = \"fast.alert.every4h\"\n\n    static func registerDefaults() {\n        UserDefaults.standard.register(defaults: [\n            scanlines: true,\n            units: Units.metric.rawValue,\n            defaultGoalHours: 16,\n            alertGoal: true,\n            alertHourBefore: true,\n            alertEvery4h: false,\n        ])\n    }\n}\n\n/// Stored in SI internally; this is display only.\nenum Units: String, CaseIterable, Identifiable {\n    case metric, imperial\n    var id: String { rawValue }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Theme/Shapes.swift",
+   "group": "ios-theme",
+   "lang": "swift",
+   "lines": 56,
+   "note": "ChamferShape and OctagonShape, both insettable so borders sit inside.",
+   "summary": "A rectangle with the top-left and bottom-right corners cut at 45\u00b0.",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "ChamferShape",
+     "line": 4,
+     "depth": 0,
+     "doc": "A rectangle with the top-left and bottom-right corners cut at 45\u00b0."
+    },
+    {
+     "kind": "func",
+     "name": "path",
+     "line": 8,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "inset",
+     "line": 23,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "OctagonShape",
+     "line": 31,
+     "depth": 0,
+     "doc": "An octagon whose corner cuts are a fraction of the shorter side."
+    },
+    {
+     "kind": "func",
+     "name": "path",
+     "line": 35,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "inset",
+     "line": 51,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\n/// A rectangle with the top-left and bottom-right corners cut at 45\u00b0.\nstruct ChamferShape: InsettableShape {\n    var cut: CGFloat = 14\n    var inset: CGFloat = 0\n\n    func path(in rect: CGRect) -> Path {\n        let r = rect.insetBy(dx: inset, dy: inset)\n        // Keep the diagonal parallel to the outer edge when inset.\n        let c = max(0, min(cut - inset * 0.414, min(r.width, r.height) / 2))\n        var p = Path()\n        p.move(to: CGPoint(x: r.minX + c, y: r.minY))\n        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))\n        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - c))\n        p.addLine(to: CGPoint(x: r.maxX - c, y: r.maxY))\n        p.addLine(to: CGPoint(x: r.minX, y: r.maxY))\n        p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))\n        p.closeSubpath()\n        return p\n    }\n\n    func inset(by amount: CGFloat) -> ChamferShape {\n        var s = self\n        s.inset += amount\n        return s\n    }\n}\n\n/// An octagon whose corner cuts are a fraction of the shorter side.\nstruct OctagonShape: InsettableShape {\n    var cutFraction: CGFloat = 0.3\n    var inset: CGFloat = 0\n\n    func path(in rect: CGRect) -> Path {\n        let r = rect.insetBy(dx: inset, dy: inset)\n        let c = min(r.width, r.height) * cutFraction\n        var p = Path()\n        p.move(to: CGPoint(x: r.minX + c, y: r.minY))\n        p.addLine(to: CGPoint(x: r.maxX - c, y: r.minY))\n        p.addLine(to: CGPoint(x: r.maxX, y: r.minY + c))\n        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - c))\n        p.addLine(to: CGPoint(x: r.maxX - c, y: r.maxY))\n        p.addLine(to: CGPoint(x: r.minX + c, y: r.maxY))\n        p.addLine(to: CGPoint(x: r.minX, y: r.maxY - c))\n        p.addLine(to: CGPoint(x: r.minX, y: r.minY + c))\n        p.closeSubpath()\n        return p\n    }\n\n    func inset(by amount: CGFloat) -> OctagonShape {\n        var s = self\n        s.inset += amount\n        return s\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Theme/Components.swift",
+   "group": "ios-theme",
+   "lang": "swift",
+   "lines": 210,
+   "note": "Panels, titles, data rows, segmented bars, buttons, toggles, grid and scanlines.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "extension",
+     "name": "View",
+     "line": 5,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "neonGlow",
+     "line": 7,
+     "depth": 1,
+     "doc": "The two-layer neon glow used on accent text and lit segments."
+    },
+    {
+     "kind": "struct",
+     "name": "NeonPanel",
+     "line": 15,
+     "depth": 0,
+     "doc": "A chamfered panel with a 1pt accent border."
+    },
+    {
+     "kind": "struct",
+     "name": "PanelTitle",
+     "line": 31,
+     "depth": 0,
+     "doc": "\"\u25a0 TITLE \u2014\u2014\u2014\u2014\" header used at the top of panels."
+    },
+    {
+     "kind": "struct",
+     "name": "DataRow",
+     "line": 51,
+     "depth": 0,
+     "doc": "\"> LABEL ........ VALUE\" diagnostic row."
+    },
+    {
+     "kind": "struct",
+     "name": "SegmentedBar",
+     "line": 74,
+     "depth": 0,
+     "doc": "A row of square segments, lit up to `value` (in segments). A partly\nfilled segment shows dimmer."
+    },
+    {
+     "kind": "struct",
+     "name": "NeonButtonStyle",
+     "line": 98,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "enum",
+     "name": "Kind",
+     "line": 99,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "makeBody",
+     "line": 108,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "extension",
+     "name": "ButtonStyle",
+     "line": 129,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "neon",
+     "line": 130,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "NeonToggleStyle",
+     "line": 136,
+     "depth": 0,
+     "doc": "Square checkbox-style toggle."
+    },
+    {
+     "kind": "func",
+     "name": "makeBody",
+     "line": 139,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "GridBackground",
+     "line": 165,
+     "depth": 0,
+     "doc": "The purple 24pt grid behind every screen."
+    },
+    {
+     "kind": "struct",
+     "name": "ScanlineOverlay",
+     "line": 185,
+     "depth": 0,
+     "doc": "CRT scanlines over the whole UI. Optional (Settings > Display)."
+    },
+    {
+     "kind": "struct",
+     "name": "NeonFieldStyle",
+     "line": 200,
+     "depth": 0,
+     "doc": "A chamfered text field for settings."
+    },
+    {
+     "kind": "func",
+     "name": "_body",
+     "line": 201,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import SwiftUI\n\n// MARK: - Glow\n\nextension View {\n    /// The two-layer neon glow used on accent text and lit segments.\n    func neonGlow(_ color: Color, radius: CGFloat = 7) -> some View {\n        shadow(color: color, radius: 2).shadow(color: color.opacity(0.8), radius: radius)\n    }\n}\n\n// MARK: - Panel\n\n/// A chamfered panel with a 1pt accent border.\nstruct NeonPanel<Content: View>: View {\n    var accent: Color = Neon.edge\n    var cut: CGFloat = 14\n    var padding: CGFloat = 12\n    @ViewBuilder var content: Content\n\n    var body: some View {\n        VStack(alignment: .leading, spacing: 8) { content }\n            .padding(padding)\n            .frame(maxWidth: .infinity, alignment: .leading)\n            .background(ChamferShape(cut: cut).fill(Neon.panel))\n            .overlay(ChamferShape(cut: cut).strokeBorder(accent, lineWidth: 1))\n    }\n}\n\n/// \"\u25a0 TITLE \u2014\u2014\u2014\u2014\" header used at the top of panels.\nstruct PanelTitle: View {\n    var text: String\n    var color: Color = Neon.text\n\n    var body: some View {\n        HStack(spacing: 6) {\n            Rectangle().fill(color).frame(width: 6, height: 6)\n            Text(text)\n                .font(NeonFont.display(11, relativeTo: .caption))\n                .tracking(3)\n                .foregroundStyle(color)\n                .lineLimit(1)\n            Rectangle().fill(color.opacity(0.4)).frame(height: 1)\n        }\n        .accessibilityElement(children: .combine)\n        .accessibilityAddTraits(.isHeader)\n    }\n}\n\n/// \"> LABEL ........ VALUE\" diagnostic row.\nstruct DataRow: View {\n    var label: String\n    var value: String\n    var color: Color = Neon.text\n\n    var body: some View {\n        HStack {\n            Text(\"> \\(label)\")\n            Spacer(minLength: 12)\n            Text(value)\n                .foregroundStyle(color)\n                .neonGlow(color == Neon.text ? .clear : color, radius: 5)\n        }\n        .font(NeonFont.mono(13))\n        .foregroundStyle(Neon.text)\n        .accessibilityElement(children: .combine)\n    }\n}\n\n// MARK: - Segmented bar\n\n/// A row of square segments, lit up to `value` (in segments). A partly\n/// filled segment shows dimmer.\nstruct SegmentedBar: View {\n    var count: Int\n    var value: Double\n    var color: Color\n    var height: CGFloat = 9\n    var spacing: CGFloat = 2\n\n    var body: some View {\n        HStack(spacing: spacing) {\n            ForEach(0..<max(count, 1), id: \\.self) { i in\n                let lit = value >= Double(i + 1)\n                let partial = !lit && value > Double(i)\n                Rectangle()\n                    .fill(lit ? color : color.opacity(partial ? 0.55 : 0.14))\n                    .frame(height: height)\n                    .shadow(color: lit ? color : .clear, radius: 3)\n            }\n        }\n        .accessibilityHidden(true)\n    }\n}\n\n// MARK: - Buttons\n\nstruct NeonButtonStyle: ButtonStyle {\n    enum Kind {\n        case filled, outline\n    }\n\n    var kind: Kind = .filled\n    var color: Color = Neon.cyan\n    var cut: CGFloat = 10\n    var height: CGFloat = 46\n\n    func makeBody(configuration: Configuration) -> some View {\n        configuration.label\n            .font(NeonFont.display(13, relativeTo: .callout))\n            .tracking(2)\n            .textCase(.uppercase)\n            .padding(.horizontal, 16)\n            .frame(maxWidth: .infinity, minHeight: max(height, 44))\n            .foregroundStyle(kind == .filled ? Neon.background : color)\n            .background {\n                switch kind {\n                case .filled: ChamferShape(cut: cut).fill(color)\n                case .outline:\n                    ChamferShape(cut: cut).fill(Neon.buttonInset)\n                        .overlay(ChamferShape(cut: cut).strokeBorder(color, lineWidth: 1))\n                }\n            }\n            .contentShape(ChamferShape(cut: cut))\n            .opacity(configuration.isPressed ? 0.7 : 1)\n    }\n}\n\nextension ButtonStyle where Self == NeonButtonStyle {\n    static func neon(_ kind: NeonButtonStyle.Kind = .filled, _ color: Color = Neon.cyan, height: CGFloat = 46) -> NeonButtonStyle {\n        NeonButtonStyle(kind: kind, color: color, height: height)\n    }\n}\n\n/// Square checkbox-style toggle.\nstruct NeonToggleStyle: ToggleStyle {\n    var color: Color = Neon.cyan\n\n    func makeBody(configuration: Configuration) -> some View {\n        Button {\n            configuration.isOn.toggle()\n        } label: {\n            HStack {\n                configuration.label\n                    .font(NeonFont.mono(13))\n                    .foregroundStyle(Neon.text)\n                Spacer()\n                Rectangle()\n                    .strokeBorder(color, lineWidth: 1)\n                    .background(Rectangle().fill(configuration.isOn ? color : .clear).padding(4))\n                    .frame(width: 22, height: 22)\n                    .shadow(color: configuration.isOn ? color.opacity(0.7) : .clear, radius: 4)\n            }\n            .frame(minHeight: 44)\n            .contentShape(Rectangle())\n        }\n        .buttonStyle(.plain)\n        .accessibilityValue(configuration.isOn ? \"On\" : \"Off\")\n    }\n}\n\n// MARK: - Backgrounds\n\n/// The purple 24pt grid behind every screen.\nstruct GridBackground: View {\n    var spacing: CGFloat = 24\n\n    var body: some View {\n        Canvas { ctx, size in\n            var lines = Path()\n            for x in stride(from: 0, through: size.width, by: spacing) {\n                lines.addRect(CGRect(x: x, y: 0, width: 1, height: size.height))\n            }\n            for y in stride(from: 0, through: size.height, by: spacing) {\n                lines.addRect(CGRect(x: 0, y: y, width: size.width, height: 1))\n            }\n            ctx.fill(lines, with: .color(Neon.grid))\n        }\n        .background(Neon.background)\n        .accessibilityHidden(true)\n    }\n}\n\n/// CRT scanlines over the whole UI. Optional (Settings > Display).\nstruct ScanlineOverlay: View {\n    var body: some View {\n        Canvas { ctx, size in\n            var lines = Path()\n            for y in stride(from: 0, through: size.height, by: 3) {\n                lines.addRect(CGRect(x: 0, y: y, width: size.width, height: 1))\n            }\n            ctx.fill(lines, with: .color(.black.opacity(0.28)))\n        }\n        .allowsHitTesting(false)\n        .accessibilityHidden(true)\n    }\n}\n\n/// A chamfered text field for settings.\nstruct NeonFieldStyle: TextFieldStyle {\n    func _body(configuration: TextField<Self._Label>) -> some View {\n        configuration\n            .font(NeonFont.mono(14))\n            .foregroundStyle(Neon.text)\n            .padding(.horizontal, 12)\n            .frame(minHeight: 44)\n            .background(ChamferShape(cut: 8).fill(Neon.background))\n            .overlay(ChamferShape(cut: 8).strokeBorder(Neon.edge, lineWidth: 1))\n    }\n}\n"
+  },
+  {
+   "path": "ios/Coach/Theme/Format.swift",
+   "group": "ios-theme",
+   "lang": "swift",
+   "lines": 41,
+   "note": "24-hour, zero-padded, uppercase readout formats.",
+   "summary": "Text formats for the retro readouts: 24-hour, uppercase, zero-padded.",
+   "symbols": [
+    {
+     "kind": "enum",
+     "name": "Format",
+     "line": 4,
+     "depth": 0,
+     "doc": "Text formats for the retro readouts: 24-hour, uppercase, zero-padded."
+    },
+    {
+     "kind": "func",
+     "name": "hoursMinutes",
+     "line": 6,
+     "depth": 1,
+     "doc": "\"14:32\" (hours can exceed 24)."
+    },
+    {
+     "kind": "func",
+     "name": "hoursMinutesSeconds",
+     "line": 12,
+     "depth": 1,
+     "doc": "\"14:32:07\"."
+    },
+    {
+     "kind": "func",
+     "name": "countdown",
+     "line": 18,
+     "depth": 1,
+     "doc": "\"T-01:28\" before the goal, \"+00:12\" after it."
+    },
+    {
+     "kind": "func",
+     "name": "dayTime",
+     "line": 23,
+     "depth": 1,
+     "doc": "\"MON 16:30\"."
+    },
+    {
+     "kind": "func",
+     "name": "dayDate",
+     "line": 30,
+     "depth": 1,
+     "doc": "\"TUE 27.10\"."
+    },
+    {
+     "kind": "func",
+     "name": "goal",
+     "line": 37,
+     "depth": 1,
+     "doc": "\"16H\" or \"16H 30M\"."
+    }
+   ],
+   "source": "import Foundation\n\n/// Text formats for the retro readouts: 24-hour, uppercase, zero-padded.\nenum Format {\n    /// \"14:32\" (hours can exceed 24).\n    static func hoursMinutes(_ interval: TimeInterval) -> String {\n        let total = max(0, Int(interval)) / 60\n        return String(format: \"%02d:%02d\", total / 60, total % 60)\n    }\n\n    /// \"14:32:07\".\n    static func hoursMinutesSeconds(_ interval: TimeInterval) -> String {\n        let total = max(0, Int(interval))\n        return String(format: \"%02d:%02d:%02d\", total / 3600, (total / 60) % 60, total % 60)\n    }\n\n    /// \"T-01:28\" before the goal, \"+00:12\" after it.\n    static func countdown(_ remaining: TimeInterval) -> String {\n        remaining > 0 ? \"T-\" + hoursMinutes(remaining) : \"+\" + hoursMinutes(-remaining)\n    }\n\n    /// \"MON 16:30\".\n    static func dayTime(_ date: Date, calendar: Calendar = .current) -> String {\n        let weekday = date.formatted(.dateTime.weekday(.abbreviated)).uppercased()\n        let c = calendar.dateComponents([.hour, .minute], from: date)\n        return String(format: \"%@ %02d:%02d\", weekday, c.hour ?? 0, c.minute ?? 0)\n    }\n\n    /// \"TUE 27.10\".\n    static func dayDate(_ date: Date, calendar: Calendar = .current) -> String {\n        let weekday = date.formatted(.dateTime.weekday(.abbreviated)).uppercased()\n        let c = calendar.dateComponents([.day, .month], from: date)\n        return String(format: \"%@ %02d.%02d\", weekday, c.day ?? 0, c.month ?? 0)\n    }\n\n    /// \"16H\" or \"16H 30M\".\n    static func goal(_ seconds: Int) -> String {\n        let h = seconds / 3600, m = (seconds / 60) % 60\n        return m == 0 ? \"\\(h)H\" : \"\\(h)H \\(m)M\"\n    }\n}\n"
+  },
+  {
+   "path": "ios/CoachTests/SyncEngineTests.swift",
+   "group": "ios-project",
+   "lang": "swift",
+   "lines": 176,
+   "note": "Sync tests against an in-memory fake server that applies the same rule as Postgres.",
+   "summary": "In-memory stand-in for the server, applying the same last-writer-wins rule.",
+   "symbols": [
+    {
+     "kind": "actor",
+     "name": "FakeServer",
+     "line": 7,
+     "depth": 0,
+     "doc": "In-memory stand-in for the server, applying the same last-writer-wins rule."
+    },
+    {
+     "kind": "func",
+     "name": "setDuringPush",
+     "line": 14,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "remoteWrite",
+     "line": 17,
+     "depth": 1,
+     "doc": "A write made by another client (e.g. the web app)."
+    },
+    {
+     "kind": "func",
+     "name": "push",
+     "line": 19,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pull",
+     "line": 34,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "store",
+     "line": 45,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "makeFast",
+     "line": 54,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "SyncEngineTests",
+     "line": 60,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 65,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "local",
+     "line": 72,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pending",
+     "line": 76,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pushesPendingAndClearsQueue",
+     "line": 80,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "editDuringPushStaysQueued",
+     "line": 92,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pullsRemoteRecordsAndAdvancesCursor",
+     "line": 106,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "newerRemoteEditWinsAndDropsQueuedLocalEdit",
+     "line": 118,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "olderRemoteCopyDoesNotOverwriteLocal",
+     "line": 134,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pagesThroughLargePulls",
+     "line": 144,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "struct",
+     "name": "FastNotificationTests",
+     "line": 157,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "alertsFollowPreferences",
+     "line": 158,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\nimport Testing\n@testable import Coach\n\n/// In-memory stand-in for the server, applying the same last-writer-wins rule.\nactor FakeServer: SyncTransport {\n    private(set) var rows: [String: Fast] = [:]\n    private(set) var seqByID: [String: Int64] = [:]\n    private(set) var pushes: [Changes] = []\n    private var seq: Int64 = 0\n    var duringPush: (@Sendable () async throws -> Void)?\n\n    func setDuringPush(_ hook: (@Sendable () async throws -> Void)?) { duringPush = hook }\n\n    /// A write made by another client (e.g. the web app).\n    func remoteWrite(_ fast: Fast) { store(fast) }\n\n    func push(_ changes: Changes) async throws -> PushResult {\n        pushes.append(changes)\n        try await duringPush?()\n        var result = PushResult(applied: [], stale: [])\n        for f in changes.fasts {\n            if let existing = rows[f.id], existing.updatedAt >= f.updatedAt {\n                result.stale.append(f.id)\n            } else {\n                store(f)\n                result.applied.append(f.id)\n            }\n        }\n        return result\n    }\n\n    func pull(since cursor: Int64, limit: Int) async throws -> PullResult {\n        let newer = rows.values\n            .filter { seqByID[$0.id]! > cursor }\n            .sorted { seqByID[$0.id]! < seqByID[$1.id]! }\n        let page = Array(newer.prefix(limit))\n        return PullResult(\n            changes: Changes(fasts: page),\n            cursor: page.last.map { seqByID[$0.id]! } ?? cursor,\n            hasMore: newer.count > limit)\n    }\n\n    private func store(_ fast: Fast) {\n        seq += 1\n        var f = fast\n        f.serverSeq = seq\n        rows[f.id] = f\n        seqByID[f.id] = seq\n    }\n}\n\nfunc makeFast(_ id: String, updated: Date, goal: Int = 3600) -> Fast {\n    Fast(\n        id: id, startedAt: updated, endedAt: nil, goalSeconds: goal, notes: \"\",\n        createdAt: updated, updatedAt: updated, deletedAt: nil, origin: \"web\", serverSeq: nil)\n}\n\nstruct SyncEngineTests {\n    let db: AppDatabase\n    let repo: FastRepository\n    let server = FakeServer()\n\n    init() throws {\n        db = try AppDatabase.inMemory()\n        repo = FastRepository(database: db)\n    }\n\n    var engine: SyncEngine { SyncEngine(database: db) }\n\n    func local(_ id: String) throws -> Fast? {\n        try db.writer.read { try Fast.fetchOne($0, key: id) }\n    }\n\n    func pending() throws -> [String] {\n        try db.writer.read { try $0.pendingIDs(Fast.entity) }\n    }\n\n    @Test func pushesPendingAndClearsQueue() async throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        let report = try await engine.run(server)\n        #expect(report.pushed == 1)\n        #expect(await server.rows[fast.id]?.goalSeconds == 3600)\n        #expect(try pending().isEmpty)\n\n        // Nothing queued: the next sync pushes nothing.\n        _ = try await engine.run(server)\n        #expect(await server.pushes.count == 1)\n    }\n\n    @Test func editDuringPushStaysQueued() async throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        let repo = self.repo\n        await server.setDuringPush { try repo.setGoal(fast.id, seconds: 7200) }\n\n        _ = try await engine.run(server)\n        #expect(try pending() == [fast.id], \"the edit made mid-push must still be pushed\")\n\n        await server.setDuringPush(nil)\n        _ = try await engine.run(server)\n        #expect(await server.rows[fast.id]?.goalSeconds == 7200)\n        #expect(try pending().isEmpty)\n    }\n\n    @Test func pullsRemoteRecordsAndAdvancesCursor() async throws {\n        let id = \"00000000-0000-4000-8000-000000000001\"\n        await server.remoteWrite(makeFast(id, updated: .nowMillis))\n\n        let report = try await engine.run(server)\n        #expect(report.pulled == 1)\n        #expect(try local(id) != nil)\n\n        // Cursor stored: a second sync pulls nothing new.\n        #expect(try await engine.run(server).pulled == 0)\n    }\n\n    @Test func newerRemoteEditWinsAndDropsQueuedLocalEdit() async throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        _ = try await engine.run(server)\n\n        try repo.setGoal(fast.id, seconds: 7200) // local edit, queued\n        var remote = try #require(try local(fast.id))\n        remote.goalSeconds = 36000\n        remote.updatedAt = remote.updatedAt.addingTimeInterval(60) // later than the local edit\n        await server.remoteWrite(remote)\n\n        _ = try await engine.run(server)\n        #expect(try local(fast.id)?.goalSeconds == 36000)\n        #expect(await server.rows[fast.id]?.goalSeconds == 36000)\n        #expect(try pending().isEmpty)\n    }\n\n    @Test func olderRemoteCopyDoesNotOverwriteLocal() async throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        _ = try await engine.run(server)\n        try repo.setGoal(fast.id, seconds: 7200)\n\n        _ = try await engine.run(server)\n        #expect(try local(fast.id)?.goalSeconds == 7200)\n        #expect(await server.rows[fast.id]?.goalSeconds == 7200)\n    }\n\n    @Test func pagesThroughLargePulls() async throws {\n        let base = Date.nowMillis\n        for i in 1...7 {\n            await server.remoteWrite(makeFast(\n                String(format: \"00000000-0000-4000-8000-%012d\", i), updated: base))\n        }\n        var engine = self.engine\n        engine.pullPageSize = 3\n        #expect(try await engine.run(server).pulled == 7)\n        #expect(try await db.writer.read { try Fast.fetchCount($0) } == 7)\n    }\n}\n\nstruct FastNotificationTests {\n    @Test func alertsFollowPreferences() throws {\n        let defaults = try #require(UserDefaults(suiteName: \"FastNotificationTests\"))\n        defaults.removePersistentDomain(forName: \"FastNotificationTests\")\n        defaults.set(true, forKey: Prefs.alertGoal)\n        defaults.set(true, forKey: Prefs.alertHourBefore)\n        defaults.set(true, forKey: Prefs.alertEvery4h)\n\n        let start = Date.nowMillis\n        let fast = makeFast(\"00000000-0000-4000-8000-000000000009\", updated: start, goal: 16 * 3600)\n        let alerts = FastNotifications.alerts(for: fast, defaults: defaults)\n        #expect(alerts.map(\\.id) == [\"goal\", \"t-1h\", \"h4\", \"h8\", \"h12\"])\n        #expect(alerts[0].date == start.addingTimeInterval(16 * 3600))\n        #expect(alerts[1].date == start.addingTimeInterval(15 * 3600))\n\n        defaults.set(false, forKey: Prefs.alertEvery4h)\n        defaults.set(false, forKey: Prefs.alertHourBefore)\n        #expect(FastNotifications.alerts(for: fast, defaults: defaults).map(\\.id) == [\"goal\"])\n    }\n}\n"
+  },
+  {
+   "path": "ios/CoachTests/FastRepositoryTests.swift",
+   "group": "ios-project",
+   "lang": "swift",
+   "lines": 69,
+   "note": "Repository behavior: queueing, one active fast, bumps, tombstones, NULL writes.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "FastRepositoryTests",
+     "line": 6,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "init",
+     "name": "init",
+     "line": 10,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "pending",
+     "line": 15,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "startCreatesActiveFastAndQueuesIt",
+     "line": 19,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "onlyOneActiveFast",
+     "line": 26,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "endClearsActiveAndBumpsUpdatedAt",
+     "line": 31,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "endNeverPrecedesStart",
+     "line": 40,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "goalAndDeleteSync",
+     "line": 48,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "nilColumnsAreWrittenAsNull",
+     "line": 58,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport GRDB\nimport Testing\n@testable import Coach\n\nstruct FastRepositoryTests {\n    let db: AppDatabase\n    let repo: FastRepository\n\n    init() throws {\n        db = try AppDatabase.inMemory()\n        repo = FastRepository(database: db)\n    }\n\n    func pending() throws -> [String] {\n        try db.writer.read { try $0.pendingIDs(Fast.entity) }\n    }\n\n    @Test func startCreatesActiveFastAndQueuesIt() throws {\n        let fast = try repo.start(goalSeconds: 16 * 3600)\n        let active = try db.writer.read { try Fast.active($0) }\n        #expect(active == fast)\n        #expect(try pending() == [fast.id])\n    }\n\n    @Test func onlyOneActiveFast() throws {\n        try repo.start(goalSeconds: 3600)\n        #expect(throws: FastError.self) { try repo.start(goalSeconds: 3600) }\n    }\n\n    @Test func endClearsActiveAndBumpsUpdatedAt() throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        try repo.end(fast.id)\n        let stored = try #require(try db.writer.read { try Fast.fetchOne($0, key: fast.id) })\n        #expect(stored.endedAt != nil)\n        #expect(stored.updatedAt > fast.updatedAt)\n        #expect(try db.writer.read { try Fast.active($0) } == nil)\n    }\n\n    @Test func endNeverPrecedesStart() throws {\n        let start = Date.nowMillis\n        let fast = try repo.start(goalSeconds: 3600, at: start)\n        try repo.end(fast.id, at: start.addingTimeInterval(-60))\n        let stored = try #require(try db.writer.read { try Fast.fetchOne($0, key: fast.id) })\n        #expect(stored.endedAt == start)\n    }\n\n    @Test func goalAndDeleteSync() throws {\n        let fast = try repo.start(goalSeconds: 3600)\n        try repo.setGoal(fast.id, seconds: 18 * 3600)\n        try repo.delete(fast.id)\n        let stored = try #require(try db.writer.read { try Fast.fetchOne($0, key: fast.id) })\n        #expect(stored.goalSeconds == 18 * 3600)\n        #expect(stored.deletedAt != nil)\n        #expect(try pending() == [fast.id])\n    }\n\n    @Test func nilColumnsAreWrittenAsNull() throws {\n        // Ending then un-ending (as a sync from another device could) must clear the column.\n        let fast = try repo.start(goalSeconds: 3600)\n        try repo.end(fast.id)\n        try db.writer.write { db in\n            var f = try #require(try Fast.fetchOne(db, key: fast.id))\n            f.endedAt = nil\n            try f.update(db)\n        }\n        #expect(try db.writer.read { try Fast.active($0) }?.id == fast.id)\n    }\n}\n"
+  },
+  {
+   "path": "ios/CoachTests/WireFormatTests.swift",
+   "group": "ios-project",
+   "lang": "swift",
+   "lines": 44,
+   "note": "Timestamp parsing from Go and exact millisecond round trips.",
+   "summary": "",
+   "symbols": [
+    {
+     "kind": "struct",
+     "name": "WireFormatTests",
+     "line": 5,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "parsesGoTimestamps",
+     "line": 12,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "parsesOffsets",
+     "line": 18,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "rejectsInvalid",
+     "line": 25,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "func",
+     "name": "fastRoundTripsAtMillisecondPrecision",
+     "line": 29,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "import Foundation\nimport Testing\n@testable import Coach\n\nstruct WireFormatTests {\n    @Test(arguments: [\n        (\"2026-10-27T16:30:00Z\", 0.0),\n        (\"2026-10-27T16:30:00.123Z\", 0.123),\n        (\"2026-10-27T16:30:00.123456Z\", 0.123456),\n        (\"2026-10-27T16:30:00.123456789Z\", 0.123456789),\n    ])\n    func parsesGoTimestamps(input: String, fraction: Double) throws {\n        let date = try #require(Wire.parse(input))\n        let base = try Date(\"2026-10-27T16:30:00Z\", strategy: .iso8601)\n        #expect(abs(date.timeIntervalSince(base) - fraction) < 1e-6)\n    }\n\n    @Test func parsesOffsets() throws {\n        let utc = try #require(Wire.parse(\"2026-10-27T16:30:00Z\"))\n        let offset = try #require(Wire.parse(\"2026-10-27T18:30:00.000+02:00\"))\n        #expect(utc == offset)\n    }\n\n    @Test(arguments: [\"\", \"2026-10-27\", \"2026-10-27T16:30:00.Z\", \"2026-10-27T16:30:00.12aZ\", \"nonsense\"])\n    func rejectsInvalid(input: String) {\n        #expect(Wire.parse(input) == nil)\n    }\n\n    @Test func fastRoundTripsAtMillisecondPrecision() throws {\n        let now = Date.nowMillis\n        let fast = Fast(\n            id: \"7f1c5e3a-2b4d-4c6e-8f00-112233445566\", startedAt: now, endedAt: nil,\n            goalSeconds: 57600, notes: \"\", createdAt: now, updatedAt: now, deletedAt: nil,\n            origin: \"phone\", serverSeq: nil)\n        let data = try Wire.encoder().encode(Changes(fasts: [fast]))\n        let decoded = try Wire.decoder().decode(Changes.self, from: data)\n        #expect(decoded.fasts == [fast])\n\n        // The server rejects unknown fields, so only its field names go out.\n        let json = try #require(String(data: data, encoding: .utf8))\n        #expect(json.contains(\"\\\"goal_seconds\\\":57600\"))\n        #expect(!json.contains(\"server_seq\"))\n    }\n}\n"
+  },
+  {
+   "path": "ios/project.yml",
+   "group": "ios-project",
+   "lang": "yaml",
+   "lines": 70,
+   "note": "XcodeGen spec. Edit this, not the .xcodeproj.",
+   "summary": "XcodeGen spec. Regenerate the Xcode project after editing:\ncd ios && xcodegen",
+   "symbols": [
+    {
+     "kind": "key",
+     "name": "name",
+     "line": 3,
+     "depth": 0,
+     "doc": "XcodeGen spec. Regenerate the Xcode project after editing:\ncd ios && xcodegen"
+    },
+    {
+     "kind": "key",
+     "name": "options",
+     "line": 4,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "settings",
+     "line": 10,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "packages",
+     "line": 17,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "targets",
+     "line": 22,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "schemes",
+     "line": 62,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "# XcodeGen spec. Regenerate the Xcode project after editing:\n#   cd ios && xcodegen\nname: Coach\noptions:\n  bundleIdPrefix: dev.coach\n  deploymentTarget:\n    iOS: \"27.0\"\n  createIntermediateGroups: true\n\nsettings:\n  base:\n    SWIFT_VERSION: \"6.0\"\n    MARKETING_VERSION: \"0.1.0\"\n    CURRENT_PROJECT_VERSION: \"1\"\n    DEVELOPMENT_TEAM: \"\" # set your team ID to run on a device\n\npackages:\n  GRDB:\n    url: https://github.com/groue/GRDB.swift\n    from: 7.0.0\n\ntargets:\n  Coach:\n    type: application\n    platform: iOS\n    sources:\n      - path: Coach\n    dependencies:\n      - package: GRDB\n    info:\n      path: Coach/Info.plist\n      properties:\n        CFBundleDisplayName: Coach\n        UILaunchScreen:\n          UIColorName: LaunchBackground\n        UIUserInterfaceStyle: Dark\n        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]\n        UIAppFonts:\n          - ChakraPetch-Medium.ttf\n          - ChakraPetch-SemiBold.ttf\n          - ChakraPetch-Bold.ttf\n          - ShareTechMono-Regular.ttf\n    settings:\n      base:\n        PRODUCT_BUNDLE_IDENTIFIER: dev.coach.Coach\n        TARGETED_DEVICE_FAMILY: \"1\"\n        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES\n\n  CoachTests:\n    type: bundle.unit-test\n    platform: iOS\n    sources:\n      - path: CoachTests\n    dependencies:\n      - target: Coach\n      - package: GRDB\n    settings:\n      base:\n        GENERATE_INFOPLIST_FILE: YES\n        PRODUCT_BUNDLE_IDENTIFIER: dev.coach.CoachTests\n\nschemes:\n  Coach:\n    build:\n      targets:\n        Coach: all\n        CoachTests: [test]\n    test:\n      targets:\n        - CoachTests\n"
+  },
+  {
+   "path": "ios/README.md",
+   "group": "ios-project",
+   "lang": "markdown",
+   "lines": 34,
+   "note": "Build, test and run instructions.",
+   "summary": "SwiftUI, iOS 27+. The Xcode project is generated from `project.yml`; don't edit `Coach.xcodeproj` by hand.",
+   "symbols": [
+    {
+     "kind": "h1",
+     "name": "Coach iOS app",
+     "line": 1,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Layout",
+     "line": 14,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Connecting to the server",
+     "line": 24,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Running on your iPhone",
+     "line": 31,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "# Coach iOS app\n\nSwiftUI, iOS 27+. The Xcode project is generated from `project.yml`; don't edit\n`Coach.xcodeproj` by hand.\n\n```sh\ncd ios\nxcodegen                     # after adding/removing files or changing project.yml\nopen Coach.xcodeproj\nxcodebuild test -project Coach.xcodeproj -scheme Coach \\\n  -destination 'platform=iOS Simulator,name=iPhone 17'\n```\n\n## Layout\n\n- `Coach/Theme`: NEON//OS design system (colors, fonts, chamfer shapes, panels,\n  segmented bars, buttons, grid and scanlines).\n- `Coach/Data`: GRDB database. Timestamps are stored as integer milliseconds so\n  they round-trip exactly; sync's last-writer-wins depends on that.\n- `Coach/Sync`: push queued changes, then pull past the cursor. Same conflict\n  rule as the server.\n- `Coach/Features`: screens.\n\n## Connecting to the server\n\nSettings (gear on Today) > UPLINK: enter `https://coach.<tailnet>.ts.net` and\nthe `COACH_API_TOKEN` from `deploy/.env`, then TEST LINK. The token is kept in\nthe Keychain. The simulator uses the Mac's network, so it reaches the server\nwhenever the Mac is on the tailnet.\n\n## Running on your iPhone\n\nSet `DEVELOPMENT_TEAM` in `project.yml` (and change the `dev.coach.*` bundle IDs\nif you like), run `xcodegen`, then build to the device from Xcode.\n"
+  },
+  {
+   "path": "spec.md",
+   "group": "docs",
+   "lang": "markdown",
+   "lines": 143,
+   "note": "The living spec: decisions, architecture, workout schema, data model, milestones.",
+   "summary": "A personal fitness app for one user: workouts, fasting, health metrics, and later diet. The data lives in a backend the user owns. A laptop, a web UI or an LLM can read it and write to it. The original notes are in `inital_spec.md`.",
+   "symbols": [
+    {
+     "kind": "h1",
+     "name": "Coach \u2014 Spec (draft 2)",
+     "line": 1,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Decisions so far",
+     "line": 5,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Architecture",
+     "line": 30,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "iOS app",
+     "line": 47,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "Sync model",
+     "line": 55,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "Backend",
+     "line": 62,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "MCP server",
+     "line": 70,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Structured workouts",
+     "line": 80,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Tymewear plan",
+     "line": 106,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Data model sketch (v1)",
+     "line": 116,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Milestones",
+     "line": 127,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Open questions",
+     "line": 138,
+     "depth": 1,
+     "doc": ""
+    }
+   ],
+   "source": "# Coach \u2014 Spec (draft 2)\n\nA personal fitness app for one user: workouts, fasting, health metrics, and later diet. The data lives in a backend the user owns. A laptop, a web UI or an LLM can read it and write to it. The original notes are in `inital_spec.md`.\n\n## Decisions so far\n\n| Area | Decision |\n|---|---|\n| Platform | Native SwiftUI iPhone app, plus a minimal Apple Watch companion that arrives with lifting |\n| Storage | Local-first: SQLite on the device, and the app works fully offline |\n| Sync | Opportunistic background sync to a home server reached over Tailscale |\n| Backend | Postgres plus a small HTTP API on the home server. Keep the schema portable so it can move to managed Postgres (e.g. Supabase) later |\n| Languages | iOS/watchOS: Swift (SwiftUI). API and MCP server: Go. Web app: TypeScript. Ad-hoc analysis: Python against Postgres |\n| Home server | Synology DS2419+II for now (x86, Docker via Container Manager; Tailscale runs as a container). May move to a Mac mini later, so everything runs in containers |\n| Units | Both. Store SI units internally; imperial or metric is a display preference |\n| Export | None for now (no Strava, FIT export and the like) |\n| Source of truth | The backend. HealthKit is imported into it, and the app's own workouts are written back to HealthKit |\n| LLM integration | An MCP server on the home server, so Claude Desktop / Claude Code can query history and write plans |\n| Desktop | A web app served from the home server, reachable over Tailscale |\n| Workouts | Structured (intervals, sets, segments), built one type at a time, cycling first |\n| Trainer | Record only in v1. The design leaves room for ERG / target control later |\n| Fasting v1 | Start/stop, a timer, a goal, notifications. No history, widgets or Live Activity yet |\n| Diet v1 | Fasting only. Diet logging comes later |\n| Lifting | Sets logged live, on the Watch where possible, otherwise on the phone |\n| Running | Both outdoor (GPS) and treadmill (Bluetooth FTMS where available) |\n| Visual style | Retro \"NEON//OS\": chamfered panels, purple grid, glowing cyan/magenta/amber, segmented bars, monospace data, text-only tab bar. Scanlines are a user setting (on by default) |\n\nMockups: https://claude.ai/artifact/96T2a41yw2PCG3S9DBhFs4 (the second row is the chosen direction)\n\n## Architecture\n\n```\n iPhone app (SwiftUI)                 Home server (on the tailnet only)\n \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510            \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n \u2502 UI                    \u2502            \u2502 HTTP API  \u2500\u2500\u2510                \u2502\n \u2502 Recording engine      \u2502   sync     \u2502 MCP server \u2500\u253c\u2500> Postgres     \u2502\n \u2502 BLE sensor layer      \u2502 <\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500> \u2502 Web app  \u2500\u2500\u2500\u2518                \u2502\n \u2502 HealthKit bridge      \u2502 (Tailscale)\u2502 Backups                      \u2502\n \u2502 SQLite + sync outbox  \u2502            \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518                  ^               ^\n            \u2502 WatchConnectivity             \u2502 Tailscale     \u2502 MCP (stdio/HTTP)\n \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510            Laptop browser    Claude Desktop / Code\n \u2502 Watch app (later)     \u2502\n \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n### iOS app\n- **Local DB:** SQLite through GRDB. GRDB gives explicit SQL and migrations, and that control makes the sync logic simpler than it would be with SwiftData.\n- **Sensors (CoreBluetooth):** standard GATT profiles: Heart Rate (0x180D), Cycling Power (0x1818), Cycling Speed & Cadence (0x1816), and Fitness Machine / FTMS (0x1826) for trainers and treadmills. FTMS is also the way to control a trainer later.\n- **Tymewear:** the VitalPro HR strap is a normal BLE/ANT+ heart-rate strap. The breathing sensor is BLE-only and uses a proprietary, undocumented service: Garmin and Wahoo support it through vendor integrations, not a standard profile. See *Tymewear plan* below.\n- **Background:** the `bluetooth-central` background mode keeps a recording going with the screen locked. Save samples to disk as they arrive so a crash doesn't lose the ride.\n- **HealthKit:** import sleep, HRV, resting HR, weight and workouts recorded by other apps. Export finished workouts with HR and energy.\n- **Notifications:** scheduled locally on the device, such as the fasting goal, T-minus alerts and workout reminders. No push server is needed.\n\n### Sync model\n- Every row has a client-generated UUID, `created_at`, `updated_at`, a `deleted_at` tombstone and an `origin` (`phone`, `watch`, `web`, `mcp`).\n- The phone keeps an **outbox** of local changes and pushes them when the server is reachable. It pulls everything changed since the last sync cursor.\n- Conflicts are resolved last-writer-wins per record. There's little to conflict over in practice: recordings come from the phone, and plans mostly come from the desktop or MCP.\n- Plan changes made off the phone show up as an **\"incoming changes\" review** in the app, not as silent edits.\n- Sample streams (per-second power, HR, cadence, breathing) are stored as compressed chunks per recording instead of one row per sample.\n\n### Backend\n- Go services: the HTTP API and the MCP server (official Go MCP SDK), sharing one data-access package. Each is a single static binary in a small container.\n- Deployment: Docker Compose on the Synology (Postgres, API, MCP server, web app), with data on a NAS volume. The same compose file moves to a Mac mini unchanged.\n- Plain Postgres with nothing vendor-specific, so moving to Supabase later is just a data migration.\n- Network: a Tailscale container in the Compose project joins the tailnet as `coach` and serves HTTPS (with a real certificate, which iOS requires) to the API. Postgres is forwarded on the tailnet for analysis tools. Nothing is published on the LAN.\n- Auth: a bearer token for now, with Tailscale providing the network-level security. Per-device tokens can come later.\n- Backups: a nightly `pg_dump` to a NAS share, picked up by Synology Hyper Backup for an off-box copy.\n\n### MCP server\nStarting tools:\n- `get_profile` / `update_profile` (FTP, HR zones, weight)\n- `list_workouts(from, to, type)` and `get_workout(id)`, including summaries and downsampled streams\n- `get_metrics(kind, from, to)` for sleep, HRV, resting HR, fasting\n- `create_plan`, `update_plan`, `schedule_workout`, validated against the workout schema\n- `get_schema(type)`, so the LLM always writes valid structured workouts\n\nPrivacy note: anything the MCP tools return goes to the LLM provider during that session. Tools should return summaries by default and full streams only when asked.\n\n## Structured workouts\n\nThere's one JSON schema per workout type, and it's both the storage format and what an LLM writes. Cycling comes first. Here is a draft:\n\n```json\n{\n  \"type\": \"cycling\",\n  \"schema_version\": 1,\n  \"name\": \"Sweet Spot 3x12\",\n  \"target_basis\": \"ftp_fraction\",\n  \"steps\": [\n    { \"kind\": \"warmup\",   \"duration_s\": 600, \"power\": { \"from\": 0.50, \"to\": 0.75 } },\n    { \"kind\": \"repeat\", \"count\": 3, \"steps\": [\n      { \"kind\": \"work\",     \"duration_s\": 720, \"power\": { \"low\": 0.88, \"high\": 0.93 }, \"cadence\": { \"low\": 85, \"high\": 95 } },\n      { \"kind\": \"recovery\", \"duration_s\": 300, \"power\": { \"value\": 0.55 } }\n    ]},\n    { \"kind\": \"cooldown\", \"duration_s\": 600, \"power\": { \"from\": 0.65, \"to\": 0.45 } }\n  ],\n  \"notes\": \"Stay seated, smooth cadence.\"\n}\n```\n\n- Targets are fractions of FTP, resolved against the profile when the ride starts. This keeps old plans valid after an FTP change. The profile keeps an FTP history.\n- Each step can have alerts, such as a cue a few seconds before the next step.\n- Lifting (sets \u00d7 reps \u00d7 load / RPE), running (segments by time or distance, with pace or HR targets) and mobility (holds and flows) get their own schemas when we reach them.\n\n## Tymewear plan\n\nThe breathing data (breath rate, tidal volume, minute ventilation) is the only sensor without a public protocol. Try these in order:\n\n1. **Ask Tymewear.** They already integrate with Garmin, Wahoo and Apple Watch, so a partner or developer BLE spec exists. Email support or partnerships and ask for the breathing sensor's GATT service and data format for a personal app.\n2. **Inspect your own device.** Use a BLE explorer (nRF Connect or LightBlue) to list its services and characteristics, and see whether the notifications are readable. Only for personal use with your own device, and check Tymewear's terms first.\n3. **Fallback:** record breathing through Tymewear's own path (their app, or Garmin/Wahoo, which write breathing fields into the FIT file), then import that file afterwards and merge it onto the ride by timestamp. Live breathing would then be missing from the ride screen, but the data would still reach the backend.\n\nThe sensor layer treats Tymewear as an optional plugin, so cycling recording doesn't wait on this.\n\n## Data model sketch (v1)\n\n- `profile`: FTP history, HR zones, display units (imperial/metric)\n- `fast`: start, end, goal duration, notes\n- `workout_plan`: type, JSON body, `schema_version`, origin\n- `scheduled_workout`: plan id, date/time, status (planned / done / skipped)\n- `recording`: type, start, end, scheduled_workout id, summary stats, sensors used, HealthKit UUID\n- `recording_stream`: recording id, channel (power / hr / cadence / breath_rate / ventilation / gps), compressed chunk\n- `metric_sample`: kind (sleep, hrv, rhr, weight\u2026), timestamp, value, source\n- `sensor_device`: BLE identifier, type, name, last seen\n\n## Milestones\n\n1. **Foundation:** Xcode project; design-system components (chamfered panel, segmented bar, glowing text, tab bar); GRDB setup; home server running Postgres and the API; Tailscale; one entity syncing end to end.\n2. **Fasting:** start/stop, goal, notifications, the Today card. Synced.\n3. **Cycling recording:** BLE pairing; HR, power, cadence and FTMS data; Tymewear if feasible; the live ride screen; save, export to HealthKit, sync streams.\n4. **Structured cycling:** the schema; the plan calendar (Train tab); running a workout with targets shown (no ERG); the MCP server with plan tools; the incoming-changes review.\n5. **Health import:** HealthKit sleep / HRV / RHR into the Body tab and the Today vitals.\n6. **Web app v1:** calendar, plan editor, ride analysis charts.\n\nLater, roughly in order: ERG / trainer control; lifting plus the Watch app; running (GPS plus treadmill); mobility; diet logging; Live Activities and widgets.\n\n## Open questions\n\n- Synology model: Container Manager needs a supported (mostly x86 \"+\" series) model.\n- Tymewear: the answer from Tymewear, or what a BLE scan shows.\n- Web framework (React, Svelte\u2026), to decide at milestone 6.\n- Minimum iOS version: assume the newest only.\n"
+  },
+  {
+   "path": "inital_spec.md",
+   "group": "docs",
+   "lang": "markdown",
+   "lines": 22,
+   "note": "The original one-page idea.",
+   "summary": "I would like to build a workout and fitness application for myself. The goal is to have a place where I can handle multiple exercise, health, fasting, potentially diet, sleep, and other pieces of information as well. One thing  really want is for the data to not just live on-device, however, but to be synced to a location that is available for anylsis in other locations - for instance, if I wanted to use an LLM to create a schedule of workouts, be able to push it directly to the backend from my laptop or desktop.",
+   "symbols": [
+    {
+     "kind": "h1",
+     "name": "Goal",
+     "line": 1,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h1",
+     "name": "App Requirements",
+     "line": 4,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h1",
+     "name": "App Design",
+     "line": 10,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h1",
+     "name": "In-App Tools I would like to include",
+     "line": 15,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "h1",
+     "name": "Desktop/browser application",
+     "line": 19,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "# Goal\nI would like to build a workout and fitness application for myself. The goal is to have a place where I can handle multiple exercise, health, fasting, potentially diet, sleep, and other pieces of information as well. One thing  really want is for the data to not just live on-device, however, but to be synced to a location that is available for anylsis in other locations - for instance, if I wanted to use an LLM to create a schedule of workouts, be able to push it directly to the backend from my laptop or desktop.\n\n# App Requirements\n1) Iphone only\n2) Connectors to sensors like heart rate straps, tymewear breathing straps, my indoor trainer, etc\n3) Notifications for things like fasting alerts, scheduled workouts, etc\n4) Sync workouts/health data to and from apple fitness/health\n\n# App Design\n1) Homescreen with overview of metrics + quick actions perhaps? Maybe things like a button for start/stop fasting \n2) Navigation on the bottom for the categories - probably home, diet, exercise, health? Not sure what the best way to organize is yet\n3) I'd like the app to be visually interesting, not a basic fitness app\n\n# In-App Tools I would like to include\n1) First tool will be a simple one, just a fasting tracker - can be as simple as a button and a timer\n2) Second will be a workout calendar and tracked workouts, including sensors. We can start out with 4 types of workout plans - cycling, weight lifting, running, and mobility\n\n# Desktop/browser application\n1) Not sure if it should be browser based or native\n2) A place to work on workout plans/schedules and analyze data locally\n3) Potential LLM integration point for coaching/planning/analyzing\n"
+  }
+ ],
+ "linesByLang": {
+  "go": 846,
+  "sql": 19,
+  "dockerfile": 14,
+  "go-mod": 13,
+  "yaml": 121,
+  "json": 13,
+  "bash": 63,
+  "markdown": 266,
+  "swift": 2080
+ },
+ "unlisted": []
+}
