@@ -26,6 +26,8 @@
     "deploy/serve.json",
     "deploy/build-image.sh",
     "deploy/backup.sh",
+    "deploy/restore-check.sh",
+    "deploy/sql/analyst-role.sql",
     "deploy/.env.example",
     "deploy/README.md"
    ]
@@ -588,7 +590,7 @@
    "note": "Two-stage build: cross-compile on the build machine, ship a distroless image.",
    "summary": "Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\nplatform (linux/amd64 on the Synology).",
    "symbols": [],
-   "source": "# Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\n# platform (linux/amd64 on the Synology).\nFROM --platform=$BUILDPLATFORM golang:1.27 AS build\nARG TARGETOS TARGETARCH\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \\\n    go build -trimpath -ldflags=\"-s -w\" -o /out/api ./cmd/api\n\nFROM gcr.io/distroless/static-debian12:nonroot\nCOPY --from=build /out/api /api\nENTRYPOINT [\"/api\"]\n"
+   "source": "# Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\n# platform (linux/amd64 on the Synology).\nFROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS build\nARG TARGETOS TARGETARCH\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \\\n    go build -trimpath -ldflags=\"-s -w\" -o /out/api ./cmd/api\n\nFROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab\nCOPY --from=build /out/api /api\nENTRYPOINT [\"/api\"]\n"
   },
   {
    "path": "server/go.mod",
@@ -604,47 +606,47 @@
    "path": "deploy/compose.yaml",
    "group": "deploy",
    "lang": "yaml",
-   "lines": 51,
+   "lines": 57,
    "note": "Three services. ts joins the tailnet; api shares its network namespace; db is reachable only inside the project and via the ts TCP forward.",
-   "summary": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").",
+   "summary": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").\n\nThird-party images are pinned to a version and digest, so a restart can't\nsilently change them. To update one, change both.",
    "symbols": [
     {
      "kind": "key",
      "name": "name",
-     "line": 3,
+     "line": 6,
      "depth": 0,
-     "doc": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\")."
+     "doc": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").\n\nThird-party images are pinned to a version and digest, so a restart can't\nsilently change them. To update one, change both."
     },
     {
      "kind": "key",
      "name": "services",
-     "line": 5,
+     "line": 8,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "ts",
-     "line": 6,
+     "line": 9,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "db",
-     "line": 18,
+     "line": 24,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "api",
-     "line": 34,
+     "line": 40,
      "depth": 1,
      "doc": ""
     }
    ],
-   "source": "# Coach backend. Nothing here publishes a port on the LAN: the only way in is\n# the tailnet, through the `ts` container (hostname \"coach\").\nname: coach\n\nservices:\n  ts:\n    image: tailscale/tailscale:stable\n    hostname: coach\n    environment:\n      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}\n      TS_STATE_DIR: /var/lib/tailscale\n      TS_SERVE_CONFIG: /config/serve.json\n    volumes:\n      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale\n      - ./serve.json:/config/serve.json:ro\n    restart: unless-stopped\n\n  db:\n    image: postgres:17\n    container_name: coach-db\n    environment:\n      POSTGRES_DB: coach\n      POSTGRES_USER: coach\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}\n    volumes:\n      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U coach -d coach\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n    restart: unless-stopped\n\n  api:\n    # On the NAS this image is loaded from build-image.sh (it can't build\n    # there). Elsewhere, compose builds it if it's missing.\n    image: coach-api:latest\n    build: ../server\n    # Shares the ts container's network, so tailscale serve reaches it on\n    # 127.0.0.1:8080 and it reaches Postgres as \"db\".\n    network_mode: service:ts\n    environment:\n      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable\n      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}\n      LISTEN_ADDR: 127.0.0.1:8080\n    depends_on:\n      ts:\n        condition: service_started\n      db:\n        condition: service_healthy\n    restart: unless-stopped\n"
+   "source": "# Coach backend. Nothing here publishes a port on the LAN: the only way in is\n# the tailnet, through the `ts` container (hostname \"coach\").\n#\n# Third-party images are pinned to a version and digest, so a restart can't\n# silently change them. To update one, change both.\nname: coach\n\nservices:\n  ts:\n    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c\n    hostname: coach\n    environment:\n      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}\n      # Log in only when there's no saved state, so an expired auth key can't\n      # keep the machine off the tailnet after a restart.\n      TS_AUTH_ONCE: \"true\"\n      TS_STATE_DIR: /var/lib/tailscale\n      TS_SERVE_CONFIG: /config/serve.json\n    volumes:\n      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale\n      - ./serve.json:/config/serve.json:ro\n    restart: unless-stopped\n\n  db:\n    image: postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1\n    container_name: coach-db\n    environment:\n      POSTGRES_DB: coach\n      POSTGRES_USER: coach\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}\n    volumes:\n      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U coach -d coach\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n    restart: unless-stopped\n\n  api:\n    # On the NAS this image is loaded from build-image.sh (it can't build\n    # there). Elsewhere, compose builds it if it's missing.\n    image: coach-api:latest\n    build: ../server\n    # Shares the ts container's network, so tailscale serve reaches it on\n    # 127.0.0.1:8080 and it reaches Postgres as \"db\".\n    network_mode: service:ts\n    environment:\n      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable\n      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}\n      LISTEN_ADDR: 127.0.0.1:8080\n    depends_on:\n      ts:\n        condition: service_started\n      db:\n        condition: service_healthy\n    restart: unless-stopped\n"
   },
   {
    "path": "deploy/serve.json",
@@ -660,37 +662,57 @@
    "path": "deploy/build-image.sh",
    "group": "deploy",
    "lang": "bash",
-   "lines": 30,
+   "lines": 42,
    "note": "Builds the amd64 API image on the Mac (the NAS can't build) and optionally ships and restarts it.",
-   "summary": "Builds the API image for the NAS (linux/amd64) on this machine.\n\nSynology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\nso images can't be built on the NAS. They run there fine.\n\n./build-image.sh                 # writes dist/coach-api.tar\n./build-image.sh user@nas-host   # also copies it over, loads it and\n# restarts the project (asks for sudo)\n\nREMOTE_DIR overrides where the project lives on the NAS.",
+   "summary": "Builds the API image for the NAS (linux/amd64) on this machine.\n\nSynology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\nso images can't be built on the NAS. They run there fine.\n\n./build-image.sh                 # writes dist/coach-api.tar\n./build-image.sh user@nas-host   # also copies it and the deploy files over,\n# backs up the database, loads the image\n# and restarts the project (asks for sudo)\n\nIf the backup fails, nothing is deployed. REMOTE_DIR and BACKUP_DIR override\nwhere the project and its backups live on the NAS.",
    "symbols": [],
-   "source": "#!/bin/sh\n# Builds the API image for the NAS (linux/amd64) on this machine.\n#\n# Synology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\n# so images can't be built on the NAS. They run there fine.\n#\n#   ./build-image.sh                 # writes dist/coach-api.tar\n#   ./build-image.sh user@nas-host   # also copies it over, loads it and\n#                                    # restarts the project (asks for sudo)\n#\n# REMOTE_DIR overrides where the project lives on the NAS.\nset -eu\ncd \"$(dirname \"$0\")\"\n\nmkdir -p dist\ndocker buildx build --platform linux/amd64 -t coach-api:latest \\\n  --output type=docker,dest=dist/coach-api.tar ../server\necho \"built dist/coach-api.tar\"\n\n[ $# -eq 0 ] && exit 0\n\nNAS=$1\nREMOTE_DIR=${REMOTE_DIR:-/volume1/docker/coach/deploy}\nDOCKER=/usr/local/bin/docker # not on sudo's PATH on DSM\n\n# -O: legacy scp protocol, which works without enabling SFTP in DSM.\nscp -O dist/coach-api.tar \"$NAS:$REMOTE_DIR/coach-api.tar\"\nssh -t \"$NAS\" \"sudo $DOCKER load -i $REMOTE_DIR/coach-api.tar \\\n  && rm $REMOTE_DIR/coach-api.tar \\\n  && cd $REMOTE_DIR && sudo $DOCKER compose up -d\"\n"
+   "source": "#!/bin/sh\n# Builds the API image for the NAS (linux/amd64) on this machine.\n#\n# Synology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\n# so images can't be built on the NAS. They run there fine.\n#\n#   ./build-image.sh                 # writes dist/coach-api.tar\n#   ./build-image.sh user@nas-host   # also copies it and the deploy files over,\n#                                    # backs up the database, loads the image\n#                                    # and restarts the project (asks for sudo)\n#\n# If the backup fails, nothing is deployed. REMOTE_DIR and BACKUP_DIR override\n# where the project and its backups live on the NAS.\nset -eu\ncd \"$(dirname \"$0\")\"\n\nmkdir -p dist\ndocker buildx build --platform linux/amd64 -t coach-api:latest \\\n  --output type=docker,dest=dist/coach-api.tar ../server\necho \"built dist/coach-api.tar\"\n\n[ $# -eq 0 ] && exit 0\n\nNAS=$1\nREMOTE_DIR=${REMOTE_DIR:-/volume1/docker/coach/deploy}\nBACKUP_DIR=${BACKUP_DIR:-/volume1/backups/coach}\nDOCKER=/usr/local/bin/docker # not on sudo's PATH on DSM\n\n# -O: legacy scp protocol, which works without enabling SFTP in DSM.\nscp -O dist/coach-api.tar compose.yaml serve.json backup.sh restore-check.sh \"$NAS:$REMOTE_DIR/\"\nssh \"$NAS\" \"mkdir -p $REMOTE_DIR/sql\"\nscp -O sql/*.sql \"$NAS:$REMOTE_DIR/sql/\"\n# The very first deploy has no database to back up yet.\nssh -t \"$NAS\" \"set -e; cd $REMOTE_DIR\n  if sudo $DOCKER ps --format '{{.Names}}' | grep -qx coach-db; then\n    sudo sh backup.sh $BACKUP_DIR\n  else\n    echo 'no running database, skipping the backup'\n  fi\n  sudo $DOCKER load -i coach-api.tar\n  rm coach-api.tar\n  sudo $DOCKER compose up -d\"\n"
   },
   {
    "path": "deploy/backup.sh",
    "group": "deploy",
    "lang": "bash",
-   "lines": 19,
+   "lines": 21,
    "note": "Nightly pg_dump with 30-day retention.",
    "summary": "Nightly Postgres dump. On the Synology, run it from\nControl Panel > Task Scheduler as root, e.g.:\n/volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\nand include that folder in a Hyper Backup task for an off-box copy.",
    "symbols": [],
-   "source": "#!/bin/sh\n# Nightly Postgres dump. On the Synology, run it from\n# Control Panel > Task Scheduler as root, e.g.:\n#   /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\n# and include that folder in a Hyper Backup task for an off-box copy.\nset -eu\n\nBACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}\nKEEP_DAYS=${2:-30}\n\nmkdir -p \"$BACKUP_DIR\"\nout=\"$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump\"\n\n# Custom format (-Fc) is compressed and restores with pg_restore.\ndocker exec coach-db pg_dump -U coach -d coach -Fc > \"$out.tmp\"\nmv \"$out.tmp\" \"$out\"\n\nfind \"$BACKUP_DIR\" -name 'coach-*.dump' -mtime +\"$KEEP_DAYS\" -delete\necho \"wrote $out\"\n"
+   "source": "#!/bin/sh\n# Nightly Postgres dump. On the Synology, run it from\n# Control Panel > Task Scheduler as root, e.g.:\n#   /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\n# and include that folder in a Hyper Backup task for an off-box copy.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}\nKEEP_DAYS=${2:-30}\nDB=${COACH_DB_CONTAINER:-coach-db}\n\nmkdir -p \"$BACKUP_DIR\"\nout=\"$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump\"\n\n# Custom format (-Fc) is compressed and restores with pg_restore.\ndocker exec \"$DB\" pg_dump -U coach -d coach -Fc > \"$out.tmp\"\nmv \"$out.tmp\" \"$out\"\n\nfind \"$BACKUP_DIR\" -name 'coach-*.dump' -mtime +\"$KEEP_DAYS\" -delete\necho \"wrote $out\"\n"
+  },
+  {
+   "path": "deploy/restore-check.sh",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 52,
+   "note": "Weekly proof that backups work: restores the newest dump into a scratch database and compares row counts.",
+   "summary": "Weekly proof that the backups work: restores the newest dump into a scratch\ndatabase and compares it with the live one. Never touches the live database.\nOn the Synology, run it from Control Panel > Task Scheduler as root, with\n\"send run details by email only when the script terminates abnormally\":\n/volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n\nFails (exit 1) if the newest dump is missing, too old, won't restore, or has\nfar fewer rows than the live database.",
+   "symbols": [],
+   "source": "#!/bin/sh\n# Weekly proof that the backups work: restores the newest dump into a scratch\n# database and compares it with the live one. Never touches the live database.\n# On the Synology, run it from Control Panel > Task Scheduler as root, with\n# \"send run details by email only when the script terminates abnormally\":\n#   /volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n#\n# Fails (exit 1) if the newest dump is missing, too old, won't restore, or has\n# far fewer rows than the live database.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: restore-check.sh <backup-dir> [max-age-hours]}\nMAX_AGE_HOURS=${2:-26}\nDB=${COACH_DB_CONTAINER:-coach-db}\nSCRATCH=coach_restore\n\nfail() {\n  echo \"RESTORE CHECK FAILED: $*\" >&2\n  exit 1\n}\n\npsql_at() { # psql_at <database> <sql>\n  docker exec \"$DB\" psql -U coach -d \"$1\" -v ON_ERROR_STOP=1 -tAc \"$2\"\n}\n\nlatest=$(ls -t \"$BACKUP_DIR\"/coach-*.dump 2>/dev/null | head -1)\n[ -n \"$latest\" ] || fail \"no dumps in $BACKUP_DIR\"\n[ -z \"$(find \"$latest\" -mmin +$((MAX_AGE_HOURS * 60)))\" ] ||\n  fail \"newest dump is older than $MAX_AGE_HOURS hours: $latest\"\n\ntrap 'docker exec \"$DB\" dropdb -U coach --if-exists \"$SCRATCH\" >/dev/null 2>&1 || true' EXIT\ndocker exec \"$DB\" dropdb -U coach --if-exists \"$SCRATCH\"\ndocker exec \"$DB\" createdb -U coach \"$SCRATCH\"\ndocker exec -i \"$DB\" pg_restore -U coach -d \"$SCRATCH\" --exit-on-error <\"$latest\" ||\n  fail \"pg_restore could not restore $latest\"\n\ntables=$(psql_at coach \"select tablename from pg_tables where schemaname = 'public' order by 1\")\n[ -n \"$tables\" ] || fail \"live database has no tables\"\n\nfor t in $tables; do\n  live=$(psql_at coach \"select count(*) from \\\"$t\\\"\")\n  rest=$(psql_at \"$SCRATCH\" \"select count(*) from \\\"$t\\\"\") || fail \"$t is missing from the restore\"\n  # The live table may have grown since the dump, so allow some slack: the\n  # larger of 50 rows or 10%.\n  slack=$((live / 10))\n  [ \"$slack\" -ge 50 ] || slack=50\n  [ \"$rest\" -ge $((live - slack)) ] || fail \"$t looks short: $rest restored, $live live\"\n  [ \"$live\" -eq 0 ] || [ \"$rest\" -gt 0 ] || fail \"$t restored empty, $live live\"\n  echo \"ok $t: $rest restored, $live live\"\ndone\necho \"restore check passed: $latest\"\n"
+  },
+  {
+   "path": "deploy/sql/analyst-role.sql",
+   "group": "deploy",
+   "lang": "sql",
+   "lines": 29,
+   "note": "The read-only role for analysis over the tailnet.",
+   "summary": "Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\nagain; it resets the password. Run as the coach user, from deploy/ on the NAS:\n\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\npsql -U coach -d coach < sql/analyst-role.sql\n\nThe password comes from the environment so it stays out of this file and\nout of the process list.",
+   "symbols": [],
+   "source": "-- Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\n-- again; it resets the password. Run as the coach user, from deploy/ on the NAS:\n--\n--   read -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\n--   sudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\n--     psql -U coach -d coach < sql/analyst-role.sql\n--\n-- The password comes from the environment so it stays out of this file and\n-- out of the process list.\n\\set ON_ERROR_STOP on\n\\getenv analyst_password ANALYST_PASSWORD\n\\if :{?analyst_password}\n\\else\n  DO $$ BEGIN RAISE EXCEPTION 'ANALYST_PASSWORD is not set'; END $$;\n\\endif\n\nSELECT 'CREATE ROLE analyst LOGIN'\nWHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'analyst')\n\\gexec\n\nALTER ROLE analyst PASSWORD :'analyst_password';\n-- A second lock: the session itself refuses writes.\nALTER ROLE analyst SET default_transaction_read_only = on;\n\nGRANT CONNECT ON DATABASE coach TO analyst;\nGRANT USAGE ON SCHEMA public TO analyst;\nGRANT SELECT ON ALL TABLES IN SCHEMA public TO analyst;\n-- Tables added by later migrations become readable too.\nALTER DEFAULT PRIVILEGES FOR ROLE coach IN SCHEMA public GRANT SELECT ON TABLES TO analyst;\n"
   },
   {
    "path": "deploy/.env.example",
    "group": "deploy",
    "lang": "bash",
-   "lines": 14,
+   "lines": 15,
    "note": "Template for the secrets file. The real deploy/.env is git-ignored.",
    "summary": "Copy to .env and fill in. Never commit .env.",
    "symbols": [],
-   "source": "# Copy to .env and fill in. Never commit .env.\n\n# Tailscale auth key for the \"coach\" node (admin console > Settings > Keys).\n# Use a reusable or pre-approved key, and tag it if you use ACL tags.\nTS_AUTHKEY=\n\n# Generate both with: openssl rand -hex 32\n# (hex keeps them URL-safe, since the password goes into DATABASE_URL)\nPOSTGRES_PASSWORD=\nCOACH_API_TOKEN=\n\n# Where container data lives. On the Synology, use a path on the volume,\n# e.g. /volume1/docker/coach/data\nDATA_DIR=./data\n"
+   "source": "# Copy to .env and fill in. Never commit .env.\n\n# Tailscale auth key for the \"coach\" node (admin console > Settings > Keys).\n# Tag it with tag:coach-prod so the machine never expires. It's only used for\n# the first login; after that the saved state in DATA_DIR is what counts.\nTS_AUTHKEY=\n\n# Generate both with: openssl rand -hex 32\n# (hex keeps them URL-safe, since the password goes into DATABASE_URL)\nPOSTGRES_PASSWORD=\nCOACH_API_TOKEN=\n\n# Where container data lives. On the Synology, use a path on the volume,\n# e.g. /volume1/docker/coach/data\nDATA_DIR=./data\n"
   },
   {
    "path": "deploy/README.md",
    "group": "deploy",
    "lang": "markdown",
-   "lines": 67,
+   "lines": 148,
    "note": "Setup and operations guide.",
    "summary": "Three containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`). Nothing is published on the LAN. Clients reach the server at `https://coach.<your-tailnet>.ts.net` over Tailscale.",
    "symbols": [
@@ -717,27 +739,41 @@
     },
     {
      "kind": "h2",
+     "name": "Backups",
+     "line": 41,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
+     "name": "Tailscale tags and access",
+     "line": 84,
+     "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h2",
      "name": "Local development (Mac)",
-     "line": 38,
+     "line": 103,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Analysis access",
-     "line": 57,
+     "line": 122,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Moving to a Mac mini later",
-     "line": 63,
+     "line": 144,
      "depth": 1,
      "doc": ""
     }
    ],
-   "source": "# Deploying the backend\n\nThree containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`).\nNothing is published on the LAN. Clients reach the server at\n`https://coach.<your-tailnet>.ts.net` over Tailscale.\n\n## One-time Tailscale setup\n\n1. In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates** (DNS page).\n2. Create an auth key (Settings > Keys) and put it in `.env` as `TS_AUTHKEY`.\n3. Install Tailscale on the iPhone and the laptop, signed in to the same tailnet.\n\n## Synology (DS2419+II, DSM 7.2)\n\n1. Install **Container Manager** from Package Center.\n2. Copy the repo to the NAS, e.g. `/volume1/docker/coach` (the `server/` and `deploy/` folders are what's needed).\n3. In `deploy/`, `cp .env.example .env` and fill it in. Set `DATA_DIR=/volume1/docker/coach/data`.\n4. Build the API image **on the Mac** and load it onto the NAS (enable SSH in Control Panel > Terminal first):\n\n   ```sh\n   deploy/build-image.sh you@nas-hostname\n   ```\n\n   This cross-builds for linux/amd64, copies the image over, loads it and runs\n   `docker compose up -d`. It asks for your NAS password for sudo.\n   Without an argument it only writes `deploy/dist/coach-api.tar`, which you can\n   load through Container Manager > Image > Add > From file instead.\n\n   **Don't build on the NAS.** DSM's kernel has no seccomp support, so\n   `docker compose up --build` (or a Container Manager project build) fails with\n   `seccomp: config provided but seccomp not supported`. Running containers works fine.\n5. Check it's up from the laptop: `curl https://coach.<tailnet>.ts.net/healthz` should return `{\"status\":\"ok\"}`.\n   The first request can take a few seconds while the certificate is issued.\n6. Schedule `backup.sh` (see the comment at the top of it).\n\nTo deploy a new API version later, run `deploy/build-image.sh you@nas-hostname` again.\n\n## Local development (Mac)\n\nUse the same compose file with Docker Desktop running and a separate auth key\n(it shows up as another `coach` node, e.g. `coach-1`). Or run only Postgres\nand the API directly:\n\n```sh\ndocker run -d --name coach-dev-db -e POSTGRES_PASSWORD=dev -p 127.0.0.1:5432:5432 postgres:17\ncd server\nDATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable \\\nCOACH_API_TOKEN=$(openssl rand -hex 32) go run ./cmd/api\n```\n\nIntegration tests need a disposable database. They drop the schema:\n\n```sh\nCOACH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable go test ./...\n```\n\n## Analysis access\n\nPostgres is forwarded on the tailnet at `coach.<tailnet>.ts.net:5432`, for\npsql, Python notebooks and the like. Consider creating a read-only role for\nanalysis, separate from the `coach` user the API uses.\n\n## Moving to a Mac mini later\n\nStop the project, copy `DATA_DIR` and `.env`, and run `docker compose up -d`\non the new machine. The tailnet name stays `coach` as long as the `tailscale`\nstate directory comes along.\n"
+   "source": "# Deploying the backend\n\nThree containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`).\nNothing is published on the LAN. Clients reach the server at\n`https://coach.<your-tailnet>.ts.net` over Tailscale.\n\n## One-time Tailscale setup\n\n1. In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates** (DNS page).\n2. Create an auth key (Settings > Keys) and put it in `.env` as `TS_AUTHKEY`.\n3. Install Tailscale on the iPhone and the laptop, signed in to the same tailnet.\n\n## Synology (DS2419+II, DSM 7.2)\n\n1. Install **Container Manager** from Package Center.\n2. Copy the repo to the NAS, e.g. `/volume1/docker/coach` (the `server/` and `deploy/` folders are what's needed).\n3. In `deploy/`, `cp .env.example .env` and fill it in. Set `DATA_DIR=/volume1/docker/coach/data`.\n4. Build the API image **on the Mac** and load it onto the NAS (enable SSH in Control Panel > Terminal first):\n\n   ```sh\n   deploy/build-image.sh you@nas-hostname\n   ```\n\n   This cross-builds for linux/amd64, copies the image over, loads it and runs\n   `docker compose up -d`. It asks for your NAS password for sudo.\n   Without an argument it only writes `deploy/dist/coach-api.tar`, which you can\n   load through Container Manager > Image > Add > From file instead.\n\n   **Don't build on the NAS.** DSM's kernel has no seccomp support, so\n   `docker compose up --build` (or a Container Manager project build) fails with\n   `seccomp: config provided but seccomp not supported`. Running containers works fine.\n5. Check it's up from the laptop: `curl https://coach.<tailnet>.ts.net/healthz` should return `{\"status\":\"ok\"}`.\n   The first request can take a few seconds while the certificate is issued.\n6. Schedule `backup.sh` (see the comment at the top of it).\n7. Schedule `restore-check.sh` weekly (see [Backups](#backups)).\n\nTo deploy later, run `deploy/build-image.sh you@nas-hostname` again. It copies\nthe deploy files too, and backs up the database before restarting anything. If\nthe backup fails, nothing is deployed.\n\n## Backups\n\n`backup.sh` writes a nightly dump, and `restore-check.sh` proves the dumps work.\nThe check restores the newest dump into a scratch database and compares row\ncounts with the live one. It fails if the dump is missing, more than 26 hours\nold, unreadable, or well short of the live data.\n\nRun it once by hand on the NAS, from `deploy/`:\n\n```sh\nsudo sh restore-check.sh /volume1/backups/coach\n```\n\nThen add a weekly task in Control Panel > Task Scheduler, as root, with\n**Send run details by email** and **only when the script terminates\nabnormally** ticked (this needs DSM's email notifications set up):\n\n```sh\n/volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n```\n\nTo check that the email arrives, point a one-off run at a broken dump:\n\n```sh\nmkdir /volume1/backups/coach-broken\nhead -c 4096 \"$(ls -t /volume1/backups/coach/coach-*.dump | head -1)\" \\\n  > /volume1/backups/coach-broken/coach-broken.dump\n```\n\nTemporarily set the task's path to `/volume1/backups/coach-broken`, run it from\nTask Scheduler, then set it back and delete that folder.\n\nTo restore for real, stop the API and replace the database from a dump:\n\n```sh\nsudo /usr/local/bin/docker compose stop api\nsudo /usr/local/bin/docker exec coach-db dropdb -U coach --force coach\nsudo /usr/local/bin/docker exec coach-db createdb -U coach coach\nsudo /usr/local/bin/docker exec -i coach-db pg_restore -U coach -d coach --exit-on-error \\\n  < /volume1/backups/coach/coach-YYYYMMDD-HHMMSS.dump\nsudo /usr/local/bin/docker compose start api\n```\n\n## Tailscale tags and access\n\nTagged machines don't expire, and tags are what the access policy refers to.\nDo these in order, so nothing loses access halfway:\n\n1. In the admin console's Access Controls page, add the `tagOwners` block from\n   `tailscale-policy.example.hujson`, leaving your existing rules alone.\n2. On the Machines page, open the `coach` machine's menu and use **Edit ACL\n   tags** to add `tag:coach-prod`. Check it now shows **Expiry disabled**, and\n   that the phone still syncs.\n3. Create a new auth key tagged `tag:coach-prod` and put it in `.env` as\n   `TS_AUTHKEY`, for rebuilding the machine later.\n4. Replace the default allow-everything rule with the `grants` and `hosts` from\n   the example, filling in the laptop's Tailscale IP. Keep any rules you added\n   for other machines.\n5. Check it: the laptop can reach `coach.<tailnet>.ts.net:5432` with\n   `nc -z coach.<tailnet>.ts.net 5432`, and the phone still syncs but can't\n   open that port.\n\n## Local development (Mac)\n\nUse the same compose file with Docker Desktop running and a separate auth key\n(it shows up as another `coach` node, e.g. `coach-1`). Or run only Postgres\nand the API directly:\n\n```sh\ndocker run -d --name coach-dev-db -e POSTGRES_PASSWORD=dev -p 127.0.0.1:5432:5432 postgres:17.11\ncd server\nDATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable \\\nCOACH_API_TOKEN=$(openssl rand -hex 32) go run ./cmd/api\n```\n\nIntegration tests need a disposable database. They drop the schema:\n\n```sh\nCOACH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable go test ./...\n```\n\n## Analysis access\n\nPostgres is forwarded on the tailnet at `coach.<tailnet>.ts.net:5432`, for\npsql, Python notebooks and the like. Use the read-only `analyst` role, not the\n`coach` user the API uses. Create it once on the NAS, from `deploy/` (the\npassword prompt is silent; `openssl rand -hex 32` makes a good one):\n\n```sh\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\n  psql -U coach -d coach < sql/analyst-role.sql\nunset ANALYST_PASSWORD\n```\n\nThen connect from the laptop:\n\n```sh\npsql \"postgres://analyst@coach.<tailnet>.ts.net:5432/coach?sslmode=disable\"\n```\n\nThe tailnet encrypts the connection, which is why `sslmode=disable` is fine here.\n\n## Moving to a Mac mini later\n\nStop the project, copy `DATA_DIR` and `.env`, and run `docker compose up -d`\non the new machine. The tailnet name stays `coach` as long as the `tailscale`\nstate directory comes along.\n"
   },
   {
    "path": "ios/Coach/Data/AppDatabase.swift",
@@ -2400,13 +2436,13 @@
  ],
  "linesByLang": {
   "go": 846,
-  "sql": 19,
+  "sql": 48,
   "dockerfile": 14,
   "go-mod": 13,
-  "yaml": 121,
+  "yaml": 127,
   "json": 13,
-  "bash": 63,
-  "markdown": 266,
+  "bash": 130,
+  "markdown": 347,
   "swift": 2080
  },
  "unlisted": []

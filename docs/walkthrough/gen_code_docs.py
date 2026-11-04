@@ -42,6 +42,8 @@ GROUPS = [
         ("deploy/serve.json", "Tailscale serve config: HTTPS on 443 to the API, TCP 5432 to Postgres."),
         ("deploy/build-image.sh", "Builds the amd64 API image on the Mac (the NAS can't build) and optionally ships and restarts it."),
         ("deploy/backup.sh", "Nightly pg_dump with 30-day retention."),
+        ("deploy/restore-check.sh", "Weekly proof that backups work: restores the newest dump into a scratch database and compares row counts."),
+        ("deploy/sql/analyst-role.sql", "The read-only role for analysis over the tailnet."),
         ("deploy/.env.example", "Template for the secrets file. The real deploy/.env is git-ignored."),
         ("deploy/README.md", "Setup and operations guide."),
     ]),

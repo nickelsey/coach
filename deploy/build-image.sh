@@ -5,10 +5,12 @@
 # so images can't be built on the NAS. They run there fine.
 #
 #   ./build-image.sh                 # writes dist/coach-api.tar
-#   ./build-image.sh user@nas-host   # also copies it over, loads it and
-#                                    # restarts the project (asks for sudo)
+#   ./build-image.sh user@nas-host   # also copies it and the deploy files over,
+#                                    # backs up the database, loads the image
+#                                    # and restarts the project (asks for sudo)
 #
-# REMOTE_DIR overrides where the project lives on the NAS.
+# If the backup fails, nothing is deployed. REMOTE_DIR and BACKUP_DIR override
+# where the project and its backups live on the NAS.
 set -eu
 cd "$(dirname "$0")"
 
@@ -21,10 +23,20 @@ echo "built dist/coach-api.tar"
 
 NAS=$1
 REMOTE_DIR=${REMOTE_DIR:-/volume1/docker/coach/deploy}
+BACKUP_DIR=${BACKUP_DIR:-/volume1/backups/coach}
 DOCKER=/usr/local/bin/docker # not on sudo's PATH on DSM
 
 # -O: legacy scp protocol, which works without enabling SFTP in DSM.
-scp -O dist/coach-api.tar "$NAS:$REMOTE_DIR/coach-api.tar"
-ssh -t "$NAS" "sudo $DOCKER load -i $REMOTE_DIR/coach-api.tar \
-  && rm $REMOTE_DIR/coach-api.tar \
-  && cd $REMOTE_DIR && sudo $DOCKER compose up -d"
+scp -O dist/coach-api.tar compose.yaml serve.json backup.sh restore-check.sh "$NAS:$REMOTE_DIR/"
+ssh "$NAS" "mkdir -p $REMOTE_DIR/sql"
+scp -O sql/*.sql "$NAS:$REMOTE_DIR/sql/"
+# The very first deploy has no database to back up yet.
+ssh -t "$NAS" "set -e; cd $REMOTE_DIR
+  if sudo $DOCKER ps --format '{{.Names}}' | grep -qx coach-db; then
+    sudo sh backup.sh $BACKUP_DIR
+  else
+    echo 'no running database, skipping the backup'
+  fi
+  sudo $DOCKER load -i coach-api.tar
+  rm coach-api.tar
+  sudo $DOCKER compose up -d"

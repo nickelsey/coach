@@ -25,31 +25,14 @@
         "A backup taken automatically before each deploy.",
       ],
       impl: [
-        ["Restore check script", `<p>A <code>deploy/restore-check.sh</code> that restores the newest dump into <code>coach_restore</code> and compares row counts per table with the live database. Schedule it weekly in DSM Task Scheduler with “send run details by email only when the script terminates abnormally”.</p>` + code(`latest=$(ls -t "$BACKUP_DIR"/*.dump | head -1)
-docker exec coach-db dropdb -U coach --if-exists coach_restore
-docker exec coach-db createdb -U coach coach_restore
-docker exec -i coach-db pg_restore -U coach -d coach_restore < "$latest"
-for t in fasts; do
-  live=$(docker exec coach-db psql -U coach -d coach -tAc "select count(*) from $t")
-  rest=$(docker exec coach-db psql -U coach -d coach_restore -tAc "select count(*) from $t")
-  [ "$rest" -ge $((live - 50)) ] || { echo "restore of $t looks short: $rest vs $live"; exit 1; }
-done`)],
-        ["Tailscale tags and ACLs", `<p>Re-key the ts container with an auth key that carries <code>tag:coach-prod</code>. Tagged machines don't expire. Then restrict access in the policy file so the database port is laptop-only:</p>` + code(`{
-  "tagOwners": { "tag:coach-prod": ["autogroup:admin"], "tag:coach-dev": ["autogroup:admin"] },
-  "grants": [
-    { "src": ["autogroup:member"], "dst": ["tag:coach-prod"], "ip": ["443"] },
-    { "src": ["your-laptop"],      "dst": ["tag:coach-prod"], "ip": ["5432"] }
-  ]
-}`) + `<p class="muted">Replace <code>your-laptop</code> with the laptop's machine name or a host alias. Check this against your existing policy, which may have a default allow-all rule.</p>`],
-        ["Pin image versions", `<p>Replace floating tags with exact versions (or digests): <code>tailscale/tailscale:v1.x.y</code>, <code>postgres:17.x</code>, <code>golang:1.27.x</code> and the distroless base by digest. Phase 2 adds automated update PRs so pinning doesn't mean falling behind.</p>`],
-        ["Read-only analysis role", `<p>A one-off SQL file kept in <code>deploy/sql/</code>, run once with psql. Default privileges make future tables readable too.</p>` + code(`CREATE ROLE analyst LOGIN PASSWORD '…';
-GRANT CONNECT ON DATABASE coach TO analyst;
-GRANT USAGE ON SCHEMA public TO analyst;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO analyst;
-ALTER DEFAULT PRIVILEGES FOR ROLE coach IN SCHEMA public GRANT SELECT ON TABLES TO analyst;`)],
-        ["Backup before deploy (stopgap)", `<p>Have <code>build-image.sh</code> run <code>backup.sh</code> on the NAS before <code>compose up</code>. Phase 3 replaces this with the prod deploy script.</p>`],
+        ["Status", `<p>The repo side is done: the scripts, SQL, pinned images and policy template are in <code>deploy/</code>, and <code>deploy/README.md</code> has the steps. What remains happens on the NAS and in the Tailscale console: deploy once, run the first restore check, schedule it, tag the machine, apply the policy and create the analyst role.</p>`],
+        ["Restore check script", `<p><code>deploy/restore-check.sh</code> restores the newest dump into a scratch database and compares every public table with the live one, so new tables are covered automatically. It fails if the dump is missing, over 26 hours old, unreadable, or short by more than 50 rows or 10%, whichever is larger. Schedule it weekly in DSM Task Scheduler with “send run details by email only when the script terminates abnormally”.</p>`],
+        ["Tailscale tags and ACLs", `<p>Tag the running machine from the admin console; tagged machines don't expire. The compose file now sets <code>TS_AUTH_ONCE</code>, so the container logs in only when it has no saved state and an expired auth key can't keep it off the tailnet after a restart. <code>deploy/tailscale-policy.example.hujson</code> limits the database port to the laptop. The order matters, so follow the README: add the tag owners, tag the machine, then replace the default allow-all rule.</p>`],
+        ["Pin image versions", `<p>Postgres, Tailscale, Go and the distroless base are each pinned to a version and digest. <code>coach-api:latest</code> is the one exception: it is built locally, and phase 3 replaces it with registry digests. Phase 2 adds automated update PRs so pinning doesn't mean falling behind.</p>`],
+        ["Read-only analysis role", `<p><code>deploy/sql/analyst-role.sql</code> creates the role and can be run again to change the password, which comes from the environment. Default privileges make future tables readable too, and the role's sessions default to read-only as a second lock.</p>`],
+        ["Backup before deploy (stopgap)", `<p><code>build-image.sh</code> now copies the deploy files to the NAS and runs <code>backup.sh</code> before loading the image. If the backup fails, nothing is deployed. Phase 3 replaces this with the prod deploy script.</p>`],
       ],
-      done: ["A restore check passes and a deliberately broken one emails you.", "The coach machine shows as tagged with no expiry.", "<code>docker compose config</code> shows no floating tags.", "The analyst role can SELECT but not INSERT; the phone can't reach :5432."],
+      done: ["A restore check passes and a deliberately broken one emails you.", "The coach machine shows as tagged with no expiry.", "<code>docker compose config</code> shows no floating third-party tags.", "The analyst role can SELECT but not INSERT; the phone can't reach :5432."],
       learn: "Postgres roles and privileges, Tailscale policy syntax.",
       agent: "Scripts and SQL are good agent tasks. The Tailscale admin console and DSM Task Scheduler steps are yours.",
     },
@@ -196,6 +179,7 @@ CREATE INDEX fasts_user_seq ON fasts (user_id, server_seq);`)],
         ["Request scoping", `<p>The auth middleware resolves the token to a <code>Principal{UserID, DeviceID, Scopes}</code> in the request context. Store functions take the user ID as an explicit argument rather than reading a global, so a missing scope is a compile error, not a data leak. Push takes <code>user_id</code> from the principal, never from the body, and the upsert refuses to touch another user's row even if an id is guessed:</p>` + code(`ON CONFLICT (id) DO UPDATE SET …
 WHERE fasts.updated_at < EXCLUDED.updated_at
   AND fasts.user_id = EXCLUDED.user_id`)],
+        ["Analyst role", `<p>The analyst role can read future tables by default, so revoke its access to the token table in the same migration that creates it.</p>`],
         ["Sync cursor", `<p>The global <code>sync_seq</code> still works: each user sees gaps where other users' writes were, which is harmless. Pull filters by <code>user_id</code> using the new index.</p>`],
         ["Migrating off the shared token", `<p>One release accepts both: the old <code>COACH_API_TOKEN</code> maps to the owner user. Create device tokens for the phone and laptop with coachctl, switch the app, then remove the old token.</p>`],
         ["Two active fasts", `<p>After a pull, if more than one fast is active, end the older one at the newer one's start, as a normal edit so it syncs. Deterministic, so every device reaches the same result.</p>`],

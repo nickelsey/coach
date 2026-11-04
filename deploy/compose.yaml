@@ -1,13 +1,19 @@
 # Coach backend. Nothing here publishes a port on the LAN: the only way in is
 # the tailnet, through the `ts` container (hostname "coach").
+#
+# Third-party images are pinned to a version and digest, so a restart can't
+# silently change them. To update one, change both.
 name: coach
 
 services:
   ts:
-    image: tailscale/tailscale:stable
+    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c
     hostname: coach
     environment:
       TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}
+      # Log in only when there's no saved state, so an expired auth key can't
+      # keep the machine off the tailnet after a restart.
+      TS_AUTH_ONCE: "true"
       TS_STATE_DIR: /var/lib/tailscale
       TS_SERVE_CONFIG: /config/serve.json
     volumes:
@@ -16,7 +22,7 @@ services:
     restart: unless-stopped
 
   db:
-    image: postgres:17
+    image: postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1
     container_name: coach-db
     environment:
       POSTGRES_DB: coach

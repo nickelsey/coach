@@ -1,0 +1,23 @@
+// Tailscale access policy for Coach: paste into the admin console's Access
+// Controls page, merging with anything you already have. The default policy
+// allows everything, so these rules only take effect once that rule is gone.
+{
+  "tagOwners": {
+    "tag:coach-prod": ["autogroup:admin"],
+    "tag:coach-dev":  ["autogroup:admin"],
+  },
+
+  // The laptop's Tailscale IP, from the Machines page.
+  "hosts": {
+    "laptop": "100.x.y.z",
+  },
+
+  "grants": [
+    // Your own devices keep reaching each other as they do today.
+    { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
+    // The API: phone and laptop.
+    { "src": ["autogroup:member"], "dst": ["tag:coach-prod"], "ip": ["443"] },
+    // Postgres: the laptop only.
+    { "src": ["laptop"], "dst": ["tag:coach-prod"], "ip": ["5432"] },
+  ],
+}
