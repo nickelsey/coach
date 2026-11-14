@@ -20,11 +20,14 @@
   {
    "id": "deploy",
    "title": "Deploy \u00b7 Synology",
-   "blurb": "How the server runs: Compose topology, the Tailscale front door, image builds and backups.",
+   "blurb": "How the server runs and how it gets there: the CI workflow, the deploy scripts on the NAS, Compose topology, the Tailscale front door and backups.",
    "files": [
     "deploy/compose.yaml",
-    "deploy/serve.json",
-    "deploy/build-image.sh",
+    "deploy/config/serve.json",
+    ".github/workflows/server.yml",
+    "deploy/nas/coach-deploy",
+    "deploy/deploy.sh",
+    "deploy/compose.sh",
     "deploy/backup.sh",
     "deploy/restore-check.sh",
     "deploy/sql/analyst-role.sql",
@@ -99,39 +102,46 @@
    "path": "server/cmd/api/main.go",
    "group": "server",
    "lang": "go",
-   "lines": 98,
+   "lines": 102,
    "note": "Entry point. Reads config from the environment, waits for Postgres, runs migrations, serves HTTP and shuts down cleanly on SIGTERM.",
    "summary": "Command api serves the Coach sync API.\n\nConfiguration comes from the environment:\n\nDATABASE_URL     Postgres connection string (required)\nCOACH_API_TOKEN  bearer token clients must send, at least 32 chars (required)\nLISTEN_ADDR      address to listen on (default \":8080\")",
    "symbols": [
     {
+     "kind": "var",
+     "name": "version",
+     "line": 29,
+     "depth": 0,
+     "doc": "version is the commit this binary was built from, set at build time with\n-ldflags \"-X main.version=...\"."
+    },
+    {
      "kind": "func",
      "name": "main",
-     "line": 27,
+     "line": 31,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "run",
-     "line": 35,
+     "line": 39,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "connectWithRetry",
-     "line": 82,
+     "line": 86,
      "depth": 0,
      "doc": "connectWithRetry waits for Postgres, which may still be starting when the\ncontainer comes up."
     }
    ],
-   "source": "// Command api serves the Coach sync API.\n//\n// Configuration comes from the environment:\n//\n//\tDATABASE_URL     Postgres connection string (required)\n//\tCOACH_API_TOKEN  bearer token clients must send, at least 32 chars (required)\n//\tLISTEN_ADDR      address to listen on (default \":8080\")\npackage main\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"coach/server/internal/api\"\n\t\"coach/server/internal/db\"\n\t\"coach/server/internal/store\"\n\n\t\"github.com/jackc/pgx/v5/pgxpool\"\n)\n\nfunc main() {\n\tlog := slog.New(slog.NewJSONHandler(os.Stdout, nil))\n\tif err := run(log); err != nil {\n\t\tlog.Error(\"fatal\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n}\n\nfunc run(log *slog.Logger) error {\n\tdbURL := os.Getenv(\"DATABASE_URL\")\n\ttoken := os.Getenv(\"COACH_API_TOKEN\")\n\taddr := os.Getenv(\"LISTEN_ADDR\")\n\tif addr == \"\" {\n\t\taddr = \":8080\"\n\t}\n\tif dbURL == \"\" {\n\t\treturn errors.New(\"DATABASE_URL is required\")\n\t}\n\tif len(token) < 32 {\n\t\treturn errors.New(\"COACH_API_TOKEN must be at least 32 characters\")\n\t}\n\n\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\n\tpool, err := connectWithRetry(ctx, dbURL, log)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer pool.Close()\n\tif err := db.Migrate(ctx, pool); err != nil {\n\t\treturn err\n\t}\n\n\tsrv := &http.Server{\n\t\tAddr:              addr,\n\t\tHandler:           api.New(store.New(pool), token, log),\n\t\tReadHeaderTimeout: 10 * time.Second,\n\t}\n\terrc := make(chan error, 1)\n\tgo func() { errc <- srv.ListenAndServe() }()\n\tlog.Info(\"listening\", \"addr\", addr)\n\n\tselect {\n\tcase err := <-errc:\n\t\treturn err\n\tcase <-ctx.Done():\n\t}\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\treturn srv.Shutdown(shutdownCtx)\n}\n\n// connectWithRetry waits for Postgres, which may still be starting when the\n// container comes up.\nfunc connectWithRetry(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, error) {\n\tvar lastErr error\n\tfor attempt := 1; attempt <= 30; attempt++ {\n\t\tpool, err := db.Connect(ctx, url)\n\t\tif err == nil {\n\t\t\treturn pool, nil\n\t\t}\n\t\tlastErr = err\n\t\tlog.Warn(\"database not ready\", \"attempt\", attempt, \"err\", err)\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn nil, ctx.Err()\n\t\tcase <-time.After(2 * time.Second):\n\t\t}\n\t}\n\treturn nil, lastErr\n}\n"
+   "source": "// Command api serves the Coach sync API.\n//\n// Configuration comes from the environment:\n//\n//\tDATABASE_URL     Postgres connection string (required)\n//\tCOACH_API_TOKEN  bearer token clients must send, at least 32 chars (required)\n//\tLISTEN_ADDR      address to listen on (default \":8080\")\npackage main\n\nimport (\n\t\"context\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"os\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n\n\t\"coach/server/internal/api\"\n\t\"coach/server/internal/db\"\n\t\"coach/server/internal/store\"\n\n\t\"github.com/jackc/pgx/v5/pgxpool\"\n)\n\n// version is the commit this binary was built from, set at build time with\n// -ldflags \"-X main.version=...\".\nvar version = \"dev\"\n\nfunc main() {\n\tlog := slog.New(slog.NewJSONHandler(os.Stdout, nil))\n\tif err := run(log); err != nil {\n\t\tlog.Error(\"fatal\", \"err\", err)\n\t\tos.Exit(1)\n\t}\n}\n\nfunc run(log *slog.Logger) error {\n\tdbURL := os.Getenv(\"DATABASE_URL\")\n\ttoken := os.Getenv(\"COACH_API_TOKEN\")\n\taddr := os.Getenv(\"LISTEN_ADDR\")\n\tif addr == \"\" {\n\t\taddr = \":8080\"\n\t}\n\tif dbURL == \"\" {\n\t\treturn errors.New(\"DATABASE_URL is required\")\n\t}\n\tif len(token) < 32 {\n\t\treturn errors.New(\"COACH_API_TOKEN must be at least 32 characters\")\n\t}\n\n\tctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)\n\tdefer stop()\n\n\tpool, err := connectWithRetry(ctx, dbURL, log)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer pool.Close()\n\tif err := db.Migrate(ctx, pool); err != nil {\n\t\treturn err\n\t}\n\n\tsrv := &http.Server{\n\t\tAddr:              addr,\n\t\tHandler:           api.New(store.New(pool), token, version, log),\n\t\tReadHeaderTimeout: 10 * time.Second,\n\t}\n\terrc := make(chan error, 1)\n\tgo func() { errc <- srv.ListenAndServe() }()\n\tlog.Info(\"listening\", \"addr\", addr, \"version\", version)\n\n\tselect {\n\tcase err := <-errc:\n\t\treturn err\n\tcase <-ctx.Done():\n\t}\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)\n\tdefer cancel()\n\treturn srv.Shutdown(shutdownCtx)\n}\n\n// connectWithRetry waits for Postgres, which may still be starting when the\n// container comes up.\nfunc connectWithRetry(ctx context.Context, url string, log *slog.Logger) (*pgxpool.Pool, error) {\n\tvar lastErr error\n\tfor attempt := 1; attempt <= 30; attempt++ {\n\t\tpool, err := db.Connect(ctx, url)\n\t\tif err == nil {\n\t\t\treturn pool, nil\n\t\t}\n\t\tlastErr = err\n\t\tlog.Warn(\"database not ready\", \"attempt\", attempt, \"err\", err)\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn nil, ctx.Err()\n\t\tcase <-time.After(2 * time.Second):\n\t\t}\n\t}\n\treturn nil, lastErr\n}\n"
   },
   {
    "path": "server/internal/api/api.go",
    "group": "server",
    "lang": "go",
-   "lines": 122,
+   "lines": 124,
    "note": "The HTTP layer: routes, the bearer-token check, JSON decoding that rejects unknown fields, and mapping validation errors to 400.",
    "summary": "Package api is the HTTP layer: auth, request decoding and routing.",
    "symbols": [
@@ -145,68 +155,68 @@
     {
      "kind": "func",
      "name": "New",
-     "line": 30,
+     "line": 32,
      "depth": 0,
-     "doc": "New returns the API handler. Every /v1 route requires the bearer token."
+     "doc": "New returns the API handler. Every /v1 route requires the bearer token.\n/healthz is open and reports version, which deploys use to confirm that the\nnew build is the one answering."
     },
     {
      "kind": "struct",
      "name": "handlers",
-     "line": 44,
+     "line": 46,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "method",
      "name": "(*handlers) push",
-     "line": 49,
+     "line": 51,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "method",
      "name": "(*handlers) pull",
-     "line": 65,
+     "line": 67,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "method",
      "name": "(*handlers) fail",
-     "line": 84,
+     "line": 86,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "requireToken",
-     "line": 94,
+     "line": 96,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "intParam",
-     "line": 106,
+     "line": 108,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "writeJSON",
-     "line": 114,
+     "line": 116,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "writeError",
-     "line": 120,
+     "line": 122,
      "depth": 0,
      "doc": ""
     }
    ],
-   "source": "// Package api is the HTTP layer: auth, request decoding and routing.\npackage api\n\nimport (\n\t\"context\"\n\t\"crypto/subtle\"\n\t\"encoding/json\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"strconv\"\n\t\"strings\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst (\n\tmaxBodyBytes     = 5 << 20\n\tdefaultPullLimit = 500\n\tmaxPullLimit     = 2000\n)\n\n// Syncer is the storage the handlers need; *store.Store implements it.\ntype Syncer interface {\n\tPush(ctx context.Context, c store.Changes) (store.PushResult, error)\n\tPull(ctx context.Context, since int64, limit int) (store.PullResult, error)\n}\n\n// New returns the API handler. Every /v1 route requires the bearer token.\nfunc New(s Syncer, token string, log *slog.Logger) http.Handler {\n\th := &handlers{s: s, log: log}\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /healthz\", func(w http.ResponseWriter, r *http.Request) {\n\t\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"ok\"})\n\t})\n\n\tv1 := http.NewServeMux()\n\tv1.HandleFunc(\"POST /v1/sync/push\", h.push)\n\tv1.HandleFunc(\"GET /v1/sync/pull\", h.pull)\n\tmux.Handle(\"/v1/\", requireToken(token, v1))\n\treturn mux\n}\n\ntype handlers struct {\n\ts   Syncer\n\tlog *slog.Logger\n}\n\nfunc (h *handlers) push(w http.ResponseWriter, r *http.Request) {\n\tvar c store.Changes\n\tdec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))\n\tdec.DisallowUnknownFields()\n\tif err := dec.Decode(&c); err != nil {\n\t\twriteError(w, http.StatusBadRequest, \"invalid JSON: \"+err.Error())\n\t\treturn\n\t}\n\tres, err := h.s.Push(r.Context(), c)\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) pull(w http.ResponseWriter, r *http.Request) {\n\tsince, err := intParam(r, \"since\", 0)\n\tif err != nil || since < 0 {\n\t\twriteError(w, http.StatusBadRequest, \"since must be a non-negative integer\")\n\t\treturn\n\t}\n\tlimit, err := intParam(r, \"limit\", defaultPullLimit)\n\tif err != nil || limit < 1 || limit > maxPullLimit {\n\t\twriteError(w, http.StatusBadRequest, \"limit must be between 1 and 2000\")\n\t\treturn\n\t}\n\tres, err := h.s.Pull(r.Context(), since, int(limit))\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) fail(w http.ResponseWriter, err error) {\n\tvar ve store.ValidationError\n\tif errors.As(err, &ve) {\n\t\twriteError(w, http.StatusBadRequest, ve.Error())\n\t\treturn\n\t}\n\th.log.Error(\"request failed\", \"err\", err)\n\twriteError(w, http.StatusInternalServerError, \"internal error\")\n}\n\nfunc requireToken(token string, next http.Handler) http.Handler {\n\twant := []byte(\"Bearer \" + token)\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tgot := []byte(r.Header.Get(\"Authorization\"))\n\t\tif subtle.ConstantTimeCompare(got, want) != 1 {\n\t\t\twriteError(w, http.StatusUnauthorized, \"missing or invalid token\")\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\nfunc intParam(r *http.Request, name string, def int64) (int64, error) {\n\tv := strings.TrimSpace(r.URL.Query().Get(name))\n\tif v == \"\" {\n\t\treturn def, nil\n\t}\n\treturn strconv.ParseInt(v, 10, 64)\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tjson.NewEncoder(w).Encode(v)\n}\n\nfunc writeError(w http.ResponseWriter, status int, msg string) {\n\twriteJSON(w, status, map[string]string{\"error\": msg})\n}\n"
+   "source": "// Package api is the HTTP layer: auth, request decoding and routing.\npackage api\n\nimport (\n\t\"context\"\n\t\"crypto/subtle\"\n\t\"encoding/json\"\n\t\"errors\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"strconv\"\n\t\"strings\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst (\n\tmaxBodyBytes     = 5 << 20\n\tdefaultPullLimit = 500\n\tmaxPullLimit     = 2000\n)\n\n// Syncer is the storage the handlers need; *store.Store implements it.\ntype Syncer interface {\n\tPush(ctx context.Context, c store.Changes) (store.PushResult, error)\n\tPull(ctx context.Context, since int64, limit int) (store.PullResult, error)\n}\n\n// New returns the API handler. Every /v1 route requires the bearer token.\n// /healthz is open and reports version, which deploys use to confirm that the\n// new build is the one answering.\nfunc New(s Syncer, token, version string, log *slog.Logger) http.Handler {\n\th := &handlers{s: s, log: log}\n\tmux := http.NewServeMux()\n\tmux.HandleFunc(\"GET /healthz\", func(w http.ResponseWriter, r *http.Request) {\n\t\twriteJSON(w, http.StatusOK, map[string]string{\"status\": \"ok\", \"version\": version})\n\t})\n\n\tv1 := http.NewServeMux()\n\tv1.HandleFunc(\"POST /v1/sync/push\", h.push)\n\tv1.HandleFunc(\"GET /v1/sync/pull\", h.pull)\n\tmux.Handle(\"/v1/\", requireToken(token, v1))\n\treturn mux\n}\n\ntype handlers struct {\n\ts   Syncer\n\tlog *slog.Logger\n}\n\nfunc (h *handlers) push(w http.ResponseWriter, r *http.Request) {\n\tvar c store.Changes\n\tdec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))\n\tdec.DisallowUnknownFields()\n\tif err := dec.Decode(&c); err != nil {\n\t\twriteError(w, http.StatusBadRequest, \"invalid JSON: \"+err.Error())\n\t\treturn\n\t}\n\tres, err := h.s.Push(r.Context(), c)\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) pull(w http.ResponseWriter, r *http.Request) {\n\tsince, err := intParam(r, \"since\", 0)\n\tif err != nil || since < 0 {\n\t\twriteError(w, http.StatusBadRequest, \"since must be a non-negative integer\")\n\t\treturn\n\t}\n\tlimit, err := intParam(r, \"limit\", defaultPullLimit)\n\tif err != nil || limit < 1 || limit > maxPullLimit {\n\t\twriteError(w, http.StatusBadRequest, \"limit must be between 1 and 2000\")\n\t\treturn\n\t}\n\tres, err := h.s.Pull(r.Context(), since, int(limit))\n\tif err != nil {\n\t\th.fail(w, err)\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusOK, res)\n}\n\nfunc (h *handlers) fail(w http.ResponseWriter, err error) {\n\tvar ve store.ValidationError\n\tif errors.As(err, &ve) {\n\t\twriteError(w, http.StatusBadRequest, ve.Error())\n\t\treturn\n\t}\n\th.log.Error(\"request failed\", \"err\", err)\n\twriteError(w, http.StatusInternalServerError, \"internal error\")\n}\n\nfunc requireToken(token string, next http.Handler) http.Handler {\n\twant := []byte(\"Bearer \" + token)\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tgot := []byte(r.Header.Get(\"Authorization\"))\n\t\tif subtle.ConstantTimeCompare(got, want) != 1 {\n\t\t\twriteError(w, http.StatusUnauthorized, \"missing or invalid token\")\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\nfunc intParam(r *http.Request, name string, def int64) (int64, error) {\n\tv := strings.TrimSpace(r.URL.Query().Get(name))\n\tif v == \"\" {\n\t\treturn def, nil\n\t}\n\treturn strconv.ParseInt(v, 10, 64)\n}\n\nfunc writeJSON(w http.ResponseWriter, status int, v any) {\n\tw.Header().Set(\"Content-Type\", \"application/json\")\n\tw.WriteHeader(status)\n\tjson.NewEncoder(w).Encode(v)\n}\n\nfunc writeError(w http.ResponseWriter, status int, msg string) {\n\twriteJSON(w, status, map[string]string{\"error\": msg})\n}\n"
   },
   {
    "path": "server/internal/store/sync.go",
@@ -445,7 +455,7 @@
    "path": "server/internal/api/api_test.go",
    "group": "server",
    "lang": "go",
-   "lines": 139,
+   "lines": 145,
    "note": "Handler tests using a fake store: auth, parameter parsing, decoding and error mapping.",
    "summary": "",
    "symbols": [
@@ -501,40 +511,40 @@
     {
      "kind": "func",
      "name": "TestSyncRequiresToken",
-     "line": 69,
+     "line": 75,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "TestPullParams",
-     "line": 78,
+     "line": 84,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "TestPushDecodesBody",
-     "line": 102,
+     "line": 108,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "TestPushRejectsBadInput",
-     "line": 122,
+     "line": 128,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "func",
      "name": "TestPushValidationErrorIs400",
-     "line": 134,
+     "line": 140,
      "depth": 0,
      "doc": ""
     }
    ],
-   "source": "package api\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"io\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"strings\"\n\t\"testing\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst testToken = \"test-token-0123456789-0123456789-abcdef\"\n\ntype fakeSyncer struct {\n\tpushed    store.Changes\n\tpushErr   error\n\tpullSince int64\n\tpullLimit int\n}\n\nfunc (f *fakeSyncer) Push(_ context.Context, c store.Changes) (store.PushResult, error) {\n\tf.pushed = c\n\tif f.pushErr != nil {\n\t\treturn store.PushResult{}, f.pushErr\n\t}\n\treturn store.PushResult{Applied: []string{\"a\"}, Stale: []string{}}, nil\n}\n\nfunc (f *fakeSyncer) Pull(_ context.Context, since int64, limit int) (store.PullResult, error) {\n\tf.pullSince, f.pullLimit = since, limit\n\treturn store.PullResult{Changes: store.Changes{Fasts: []store.Fast{}}, Cursor: since}, nil\n}\n\nfunc newTestServer(t *testing.T, s Syncer) *httptest.Server {\n\tt.Helper()\n\tsrv := httptest.NewServer(New(s, testToken, slog.New(slog.NewTextHandler(io.Discard, nil))))\n\tt.Cleanup(srv.Close)\n\treturn srv\n}\n\nfunc do(t *testing.T, method, url, token, body string) *http.Response {\n\tt.Helper()\n\treq, err := http.NewRequest(method, url, strings.NewReader(body))\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif token != \"\" {\n\t\treq.Header.Set(\"Authorization\", \"Bearer \"+token)\n\t}\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tt.Cleanup(func() { resp.Body.Close() })\n\treturn resp\n}\n\nfunc TestHealthzNeedsNoToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tif resp := do(t, \"GET\", srv.URL+\"/healthz\", \"\", \"\"); resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n}\n\nfunc TestSyncRequiresToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor _, tok := range []string{\"\", \"wrong-token\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull\", tok, \"\"); resp.StatusCode != http.StatusUnauthorized {\n\t\t\tt.Errorf(\"token %q: status = %d, want 401\", tok, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPullParams(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\n\tresp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?since=42&limit=10\", testToken, \"\")\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif f.pullSince != 42 || f.pullLimit != 10 {\n\t\tt.Errorf(\"got since=%d limit=%d, want 42, 10\", f.pullSince, f.pullLimit)\n\t}\n\n\tdo(t, \"GET\", srv.URL+\"/v1/sync/pull\", testToken, \"\")\n\tif f.pullSince != 0 || f.pullLimit != defaultPullLimit {\n\t\tt.Errorf(\"defaults: got since=%d limit=%d\", f.pullSince, f.pullLimit)\n\t}\n\n\tfor _, q := range []string{\"since=-1\", \"since=abc\", \"limit=0\", \"limit=5000\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?\"+q, testToken, \"\"); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", q, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushDecodesBody(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\tbody := `{\"fasts\":[{\"id\":\"7f1c5e3a-2b4d-4c6e-8f00-112233445566\",\"started_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"ended_at\":null,\"goal_seconds\":57600,\"notes\":\"\",\"created_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"updated_at\":\"2026-10-27T16:30:00Z\",\"deleted_at\":null,\"origin\":\"phone\"}]}`\n\n\tresp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body)\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif len(f.pushed.Fasts) != 1 || f.pushed.Fasts[0].GoalSeconds != 57600 {\n\t\tt.Errorf(\"pushed = %+v\", f.pushed)\n\t}\n\tvar res store.PushResult\n\tif err := json.NewDecoder(resp.Body).Decode(&res); err != nil || len(res.Applied) != 1 {\n\t\tt.Errorf(\"response = %+v, err %v\", res, err)\n\t}\n}\n\nfunc TestPushRejectsBadInput(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor name, body := range map[string]string{\n\t\t\"malformed\":     `{\"fasts\":[`,\n\t\t\"unknown field\": `{\"workouts\":[]}`,\n\t} {\n\t\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", name, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushValidationErrorIs400(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{pushErr: store.ValidationError{}})\n\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, `{\"fasts\":[]}`); resp.StatusCode != http.StatusBadRequest {\n\t\tt.Errorf(\"status = %d, want 400\", resp.StatusCode)\n\t}\n}\n"
+   "source": "package api\n\nimport (\n\t\"context\"\n\t\"encoding/json\"\n\t\"io\"\n\t\"log/slog\"\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"strings\"\n\t\"testing\"\n\n\t\"coach/server/internal/store\"\n)\n\nconst testToken = \"test-token-0123456789-0123456789-abcdef\"\n\ntype fakeSyncer struct {\n\tpushed    store.Changes\n\tpushErr   error\n\tpullSince int64\n\tpullLimit int\n}\n\nfunc (f *fakeSyncer) Push(_ context.Context, c store.Changes) (store.PushResult, error) {\n\tf.pushed = c\n\tif f.pushErr != nil {\n\t\treturn store.PushResult{}, f.pushErr\n\t}\n\treturn store.PushResult{Applied: []string{\"a\"}, Stale: []string{}}, nil\n}\n\nfunc (f *fakeSyncer) Pull(_ context.Context, since int64, limit int) (store.PullResult, error) {\n\tf.pullSince, f.pullLimit = since, limit\n\treturn store.PullResult{Changes: store.Changes{Fasts: []store.Fast{}}, Cursor: since}, nil\n}\n\nfunc newTestServer(t *testing.T, s Syncer) *httptest.Server {\n\tt.Helper()\n\tsrv := httptest.NewServer(New(s, testToken, \"test-version\", slog.New(slog.NewTextHandler(io.Discard, nil))))\n\tt.Cleanup(srv.Close)\n\treturn srv\n}\n\nfunc do(t *testing.T, method, url, token, body string) *http.Response {\n\tt.Helper()\n\treq, err := http.NewRequest(method, url, strings.NewReader(body))\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif token != \"\" {\n\t\treq.Header.Set(\"Authorization\", \"Bearer \"+token)\n\t}\n\tresp, err := http.DefaultClient.Do(req)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tt.Cleanup(func() { resp.Body.Close() })\n\treturn resp\n}\n\nfunc TestHealthzNeedsNoToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tresp := do(t, \"GET\", srv.URL+\"/healthz\", \"\", \"\")\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\t// deploy.sh greps for exactly this, so the shape matters.\n\tbody, _ := io.ReadAll(resp.Body)\n\tif !strings.Contains(string(body), `\"version\":\"test-version\"`) {\n\t\tt.Fatalf(\"body = %s, want the version\", body)\n\t}\n}\n\nfunc TestSyncRequiresToken(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor _, tok := range []string{\"\", \"wrong-token\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull\", tok, \"\"); resp.StatusCode != http.StatusUnauthorized {\n\t\t\tt.Errorf(\"token %q: status = %d, want 401\", tok, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPullParams(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\n\tresp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?since=42&limit=10\", testToken, \"\")\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif f.pullSince != 42 || f.pullLimit != 10 {\n\t\tt.Errorf(\"got since=%d limit=%d, want 42, 10\", f.pullSince, f.pullLimit)\n\t}\n\n\tdo(t, \"GET\", srv.URL+\"/v1/sync/pull\", testToken, \"\")\n\tif f.pullSince != 0 || f.pullLimit != defaultPullLimit {\n\t\tt.Errorf(\"defaults: got since=%d limit=%d\", f.pullSince, f.pullLimit)\n\t}\n\n\tfor _, q := range []string{\"since=-1\", \"since=abc\", \"limit=0\", \"limit=5000\"} {\n\t\tif resp := do(t, \"GET\", srv.URL+\"/v1/sync/pull?\"+q, testToken, \"\"); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", q, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushDecodesBody(t *testing.T) {\n\tf := &fakeSyncer{}\n\tsrv := newTestServer(t, f)\n\tbody := `{\"fasts\":[{\"id\":\"7f1c5e3a-2b4d-4c6e-8f00-112233445566\",\"started_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"ended_at\":null,\"goal_seconds\":57600,\"notes\":\"\",\"created_at\":\"2026-10-27T16:30:00Z\",\n\t\t\"updated_at\":\"2026-10-27T16:30:00Z\",\"deleted_at\":null,\"origin\":\"phone\"}]}`\n\n\tresp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body)\n\tif resp.StatusCode != http.StatusOK {\n\t\tt.Fatalf(\"status = %d, want 200\", resp.StatusCode)\n\t}\n\tif len(f.pushed.Fasts) != 1 || f.pushed.Fasts[0].GoalSeconds != 57600 {\n\t\tt.Errorf(\"pushed = %+v\", f.pushed)\n\t}\n\tvar res store.PushResult\n\tif err := json.NewDecoder(resp.Body).Decode(&res); err != nil || len(res.Applied) != 1 {\n\t\tt.Errorf(\"response = %+v, err %v\", res, err)\n\t}\n}\n\nfunc TestPushRejectsBadInput(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{})\n\tfor name, body := range map[string]string{\n\t\t\"malformed\":     `{\"fasts\":[`,\n\t\t\"unknown field\": `{\"workouts\":[]}`,\n\t} {\n\t\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, body); resp.StatusCode != http.StatusBadRequest {\n\t\t\tt.Errorf(\"%s: status = %d, want 400\", name, resp.StatusCode)\n\t\t}\n\t}\n}\n\nfunc TestPushValidationErrorIs400(t *testing.T) {\n\tsrv := newTestServer(t, &fakeSyncer{pushErr: store.ValidationError{}})\n\tif resp := do(t, \"POST\", srv.URL+\"/v1/sync/push\", testToken, `{\"fasts\":[]}`); resp.StatusCode != http.StatusBadRequest {\n\t\tt.Errorf(\"status = %d, want 400\", resp.StatusCode)\n\t}\n}\n"
   },
   {
    "path": "server/internal/store/store_test.go",
@@ -586,11 +596,11 @@
    "path": "server/Dockerfile",
    "group": "server",
    "lang": "dockerfile",
-   "lines": 14,
+   "lines": 16,
    "note": "Two-stage build: cross-compile on the build machine, ship a distroless image.",
    "summary": "Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\nplatform (linux/amd64 on the Synology).",
    "symbols": [],
-   "source": "# Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\n# platform (linux/amd64 on the Synology).\nFROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS build\nARG TARGETOS TARGETARCH\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \\\n    go build -trimpath -ldflags=\"-s -w\" -o /out/api ./cmd/api\n\nFROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab\nCOPY --from=build /out/api /api\nENTRYPOINT [\"/api\"]\n"
+   "source": "# Cross-compiles on the build machine (e.g. an arm64 Mac) for the target\n# platform (linux/amd64 on the Synology).\nFROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:2920bb124f1a2e12a1d39f0cab756ae0068441ee1da7655dec7f5e374944095b AS build\nARG TARGETOS TARGETARCH\n# The commit being built; /healthz reports it so a deploy can tell it's live.\nARG VERSION=dev\nWORKDIR /src\nCOPY go.mod go.sum ./\nRUN go mod download\nCOPY . .\nRUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \\\n    go build -trimpath -ldflags=\"-s -w -X main.version=$VERSION\" -o /out/api ./cmd/api\n\nFROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab\nCOPY --from=build /out/api /api\nENTRYPOINT [\"/api\"]\n"
   },
   {
    "path": "server/go.mod",
@@ -606,50 +616,43 @@
    "path": "deploy/compose.yaml",
    "group": "deploy",
    "lang": "yaml",
-   "lines": 57,
+   "lines": 60,
    "note": "Three services. ts joins the tailnet; api shares its network namespace; db is reachable only inside the project and via the ts TCP forward.",
-   "summary": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").\n\nThird-party images are pinned to a version and digest, so a restart can't\nsilently change them. To update one, change both.",
+   "summary": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container.\n\nOne file serves every environment. On the NAS, run it through compose.sh,\nwhich sets the project name (coach-dev, coach-prod) and these variables.\n\nThird-party images are pinned to a version and digest, so a restart can't\nsilently change them. To update one, change both.",
    "symbols": [
     {
      "kind": "key",
-     "name": "name",
-     "line": 6,
-     "depth": 0,
-     "doc": "Coach backend. Nothing here publishes a port on the LAN: the only way in is\nthe tailnet, through the `ts` container (hostname \"coach\").\n\nThird-party images are pinned to a version and digest, so a restart can't\nsilently change them. To update one, change both."
-    },
-    {
-     "kind": "key",
      "name": "services",
-     "line": 8,
+     "line": 10,
      "depth": 0,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "ts",
-     "line": 9,
+     "line": 11,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "db",
-     "line": 24,
+     "line": 28,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "service",
      "name": "api",
-     "line": 40,
+     "line": 43,
      "depth": 1,
      "doc": ""
     }
    ],
-   "source": "# Coach backend. Nothing here publishes a port on the LAN: the only way in is\n# the tailnet, through the `ts` container (hostname \"coach\").\n#\n# Third-party images are pinned to a version and digest, so a restart can't\n# silently change them. To update one, change both.\nname: coach\n\nservices:\n  ts:\n    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c\n    hostname: coach\n    environment:\n      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}\n      # Log in only when there's no saved state, so an expired auth key can't\n      # keep the machine off the tailnet after a restart.\n      TS_AUTH_ONCE: \"true\"\n      TS_STATE_DIR: /var/lib/tailscale\n      TS_SERVE_CONFIG: /config/serve.json\n    volumes:\n      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale\n      - ./serve.json:/config/serve.json:ro\n    restart: unless-stopped\n\n  db:\n    image: postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1\n    container_name: coach-db\n    environment:\n      POSTGRES_DB: coach\n      POSTGRES_USER: coach\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}\n    volumes:\n      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U coach -d coach\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n    restart: unless-stopped\n\n  api:\n    # On the NAS this image is loaded from build-image.sh (it can't build\n    # there). Elsewhere, compose builds it if it's missing.\n    image: coach-api:latest\n    build: ../server\n    # Shares the ts container's network, so tailscale serve reaches it on\n    # 127.0.0.1:8080 and it reaches Postgres as \"db\".\n    network_mode: service:ts\n    environment:\n      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable\n      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}\n      LISTEN_ADDR: 127.0.0.1:8080\n    depends_on:\n      ts:\n        condition: service_started\n      db:\n        condition: service_healthy\n    restart: unless-stopped\n"
+   "source": "# Coach backend. Nothing here publishes a port on the LAN: the only way in is\n# the tailnet, through the `ts` container.\n#\n# One file serves every environment. On the NAS, run it through compose.sh,\n# which sets the project name (coach-dev, coach-prod) and these variables.\n#\n# Third-party images are pinned to a version and digest, so a restart can't\n# silently change them. To update one, change both.\n\nservices:\n  ts:\n    image: tailscale/tailscale:v1.104.4@sha256:ed6480b33c6eb67c9cbd203ed42b9fb57e361986725b6856def71b7a3d9e276c\n    # The machine's name on the tailnet: coach for prod, coach-dev for dev.\n    hostname: ${TS_HOSTNAME:-coach}\n    environment:\n      TS_AUTHKEY: ${TS_AUTHKEY:?set TS_AUTHKEY in .env}\n      # Log in only when there's no saved state, so an expired auth key can't\n      # keep the machine off the tailnet after a restart.\n      TS_AUTH_ONCE: \"true\"\n      TS_STATE_DIR: /var/lib/tailscale\n      TS_SERVE_CONFIG: /config/serve.json\n    volumes:\n      - ${DATA_DIR:-./data}/tailscale:/var/lib/tailscale\n      # A directory, not the file, so an updated serve.json is picked up.\n      - ${CONFIG_DIR:-./config}:/config:ro\n    restart: unless-stopped\n\n  db:\n    image: postgres:17.11@sha256:3b0cda93be7c8dba2ed484d19393d93845dc3dafb88973e248ba8e6d99d784e1\n    environment:\n      POSTGRES_DB: coach\n      POSTGRES_USER: coach\n      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}\n    volumes:\n      - ${DATA_DIR:-./data}/postgres:/var/lib/postgresql/data\n    healthcheck:\n      test: [\"CMD-SHELL\", \"pg_isready -U coach -d coach\"]\n      interval: 5s\n      timeout: 3s\n      retries: 20\n    restart: unless-stopped\n\n  api:\n    # On the NAS this is the image CI pushed, pinned by digest (the NAS can't\n    # build). Elsewhere, compose builds it if it's missing.\n    image: ${COACH_API_IMAGE:-coach-api:latest}\n    build: ../server\n    # Shares the ts container's network, so tailscale serve reaches it on\n    # 127.0.0.1:8080 and it reaches Postgres as \"db\".\n    network_mode: service:ts\n    environment:\n      DATABASE_URL: postgres://coach:${POSTGRES_PASSWORD}@db:5432/coach?sslmode=disable\n      COACH_API_TOKEN: ${COACH_API_TOKEN:?set COACH_API_TOKEN in .env}\n      LISTEN_ADDR: 127.0.0.1:8080\n    depends_on:\n      ts:\n        condition: service_started\n      db:\n        condition: service_healthy\n    restart: unless-stopped\n"
   },
   {
-   "path": "deploy/serve.json",
+   "path": "deploy/config/serve.json",
    "group": "deploy",
    "lang": "json",
    "lines": 13,
@@ -659,34 +662,93 @@
    "source": "{\n  \"TCP\": {\n    \"443\": { \"HTTPS\": true },\n    \"5432\": { \"TCPForward\": \"db:5432\" }\n  },\n  \"Web\": {\n    \"${TS_CERT_DOMAIN}:443\": {\n      \"Handlers\": {\n        \"/\": { \"Proxy\": \"http://127.0.0.1:8080\" }\n      }\n    }\n  }\n}\n"
   },
   {
-   "path": "deploy/build-image.sh",
+   "path": ".github/workflows/server.yml",
+   "group": "deploy",
+   "lang": "yaml",
+   "lines": 136,
+   "note": "CI and delivery: tests, image build, deploy to dev, then prod after approval.",
+   "summary": "Tests the server, builds its image, and deploys it to the NAS: dev on every\npush to main, then prod once the prod environment's reviewer approves.\n\nThe repo is public, so: pull requests get no secrets and no write access,\ndeploy secrets live in the dev and prod environments (restricted to main),\nactions are pinned to commits, and nothing here prints a hostname.\nSetup is in deploy/README.md.",
+   "symbols": [
+    {
+     "kind": "key",
+     "name": "name",
+     "line": 8,
+     "depth": 0,
+     "doc": "Tests the server, builds its image, and deploys it to the NAS: dev on every\npush to main, then prod once the prod environment's reviewer approves.\n\nThe repo is public, so: pull requests get no secrets and no write access,\ndeploy secrets live in the dev and prod environments (restricted to main),\nactions are pinned to commits, and nothing here prints a hostname.\nSetup is in deploy/README.md."
+    },
+    {
+     "kind": "key",
+     "name": "on",
+     "line": 10,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "permissions",
+     "line": 18,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "jobs",
+     "line": 21,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "# Tests the server, builds its image, and deploys it to the NAS: dev on every\n# push to main, then prod once the prod environment's reviewer approves.\n#\n# The repo is public, so: pull requests get no secrets and no write access,\n# deploy secrets live in the dev and prod environments (restricted to main),\n# actions are pinned to commits, and nothing here prints a hostname.\n# Setup is in deploy/README.md.\nname: server\n\non:\n  pull_request:\n    paths: [\"server/**\", \"deploy/**\", \".github/workflows/server.yml\"]\n  push:\n    branches: [main]\n    paths: [\"server/**\", \"deploy/**\", \".github/workflows/server.yml\"]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:\n  test:\n    runs-on: ubuntu-24.04\n    services:\n      postgres:\n        image: postgres:17.11\n        env:\n          POSTGRES_PASSWORD: test\n        ports: [\"5432:5432\"]\n        options: >-\n          --health-cmd \"pg_isready -U postgres\" --health-interval 2s\n          --health-timeout 2s --health-retries 15\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0\n        with:\n          go-version-file: server/go.mod\n          cache-dependency-path: server/go.sum\n      - name: Go vet and tests\n        working-directory: server\n        env:\n          COACH_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable\n        run: |\n          go vet ./...\n          go test ./...\n      - name: Check the deploy scripts\n        run: shellcheck deploy/*.sh deploy/nas/coach-deploy\n\n  image:\n    needs: test\n    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n      packages: write\n    outputs:\n      digest: ${{ steps.build.outputs.digest }}\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1\n      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0\n        with:\n          registry: ghcr.io\n          username: ${{ github.actor }}\n          password: ${{ secrets.GITHUB_TOKEN }}\n      - id: build\n        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0\n        with:\n          context: server\n          platforms: linux/amd64\n          push: true\n          tags: ghcr.io/${{ github.repository_owner }}/coach-api:${{ github.sha }}\n          build-args: VERSION=${{ github.sha }}\n          provenance: false\n      - name: Summary\n        env:\n          DIGEST: ${{ steps.build.outputs.digest }}\n        run: |\n          {\n            echo \"Image: \\`ghcr.io/$GITHUB_REPOSITORY_OWNER/coach-api@$DIGEST\\`\"\n            echo\n            echo \"To deploy this by hand on the NAS:\"\n            echo\n            echo \"    sudo /volume1/docker/coach/bin/coach-deploy <dev|prod> $GITHUB_SHA $DIGEST\"\n          } >> \"$GITHUB_STEP_SUMMARY\"\n\n  deploy-dev:\n    needs: image\n    # Off until the NAS side is set up; then set the repository variable.\n    if: vars.DEPLOY_ENABLED == 'true'\n    runs-on: ubuntu-24.04\n    environment: dev\n    concurrency: deploy-dev\n    steps:\n      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0\n        with:\n          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}\n          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}\n          tags: tag:ci\n      - name: Deploy to dev\n        env:\n          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}\n          NAS_SSH: ${{ secrets.NAS_SSH }}\n          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}\n          DIGEST: ${{ needs.image.outputs.digest }}\n        run: &deploy |\n          umask 077\n          printf '%s\\n' \"$DEPLOY_SSH_KEY\" > key\n          printf '%s\\n' \"$NAS_KNOWN_HOSTS\" > known_hosts\n          # The key's forced command on the NAS fixes the environment; this\n          # only says which commit and image.\n          ssh -i key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \\\n            -o UserKnownHostsFile=known_hosts \"$NAS_SSH\" \"$GITHUB_SHA $DIGEST\"\n\n  deploy-prod:\n    needs: [image, deploy-dev]\n    runs-on: ubuntu-24.04\n    environment: prod\n    concurrency: deploy-prod\n    steps:\n      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0\n        with:\n          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}\n          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}\n          tags: tag:ci\n      - name: Deploy to prod\n        env:\n          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}\n          NAS_SSH: ${{ secrets.NAS_SSH }}\n          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}\n          DIGEST: ${{ needs.image.outputs.digest }}\n        run: *deploy\n"
+  },
+  {
+   "path": "deploy/nas/coach-deploy",
    "group": "deploy",
    "lang": "bash",
-   "lines": 42,
-   "note": "Builds the amd64 API image on the Mac (the NAS can't build) and optionally ships and restarts it.",
-   "summary": "Builds the API image for the NAS (linux/amd64) on this machine.\n\nSynology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\nso images can't be built on the NAS. They run there fine.\n\n./build-image.sh                 # writes dist/coach-api.tar\n./build-image.sh user@nas-host   # also copies it and the deploy files over,\n# backs up the database, loads the image\n# and restarts the project (asks for sudo)\n\nIf the backup fails, nothing is deployed. REMOTE_DIR and BACKUP_DIR override\nwhere the project and its backups live on the NAS.",
+   "lines": 53,
+   "note": "The one command CI may run on the NAS. Checks the commit is on main, fetches deploy/ at that commit and hands over to deploy.sh.",
+   "summary": "The one command CI may run on the NAS. Installed once by hand as\n/volume1/docker/coach/bin/coach-deploy (owned by root), and reached only\nthrough a forced SSH command plus a sudoers rule; see deploy/README.md.\n\ncoach-deploy <dev|prod> <commit-sha> <sha256:image-digest>\n\nIt fetches deploy/ from this repo at that commit, then hands over to that\ncommit's deploy/deploy.sh. It deploys only commits that are on main and only\nthis repo's image, so a leaked key can't run anything else. Everything else\nabout a deploy lives in deploy.sh and changes with the repo; this file should\nrarely need reinstalling.",
    "symbols": [],
-   "source": "#!/bin/sh\n# Builds the API image for the NAS (linux/amd64) on this machine.\n#\n# Synology's kernel lacks seccomp, which Docker's builder needs for RUN steps,\n# so images can't be built on the NAS. They run there fine.\n#\n#   ./build-image.sh                 # writes dist/coach-api.tar\n#   ./build-image.sh user@nas-host   # also copies it and the deploy files over,\n#                                    # backs up the database, loads the image\n#                                    # and restarts the project (asks for sudo)\n#\n# If the backup fails, nothing is deployed. REMOTE_DIR and BACKUP_DIR override\n# where the project and its backups live on the NAS.\nset -eu\ncd \"$(dirname \"$0\")\"\n\nmkdir -p dist\ndocker buildx build --platform linux/amd64 -t coach-api:latest \\\n  --output type=docker,dest=dist/coach-api.tar ../server\necho \"built dist/coach-api.tar\"\n\n[ $# -eq 0 ] && exit 0\n\nNAS=$1\nREMOTE_DIR=${REMOTE_DIR:-/volume1/docker/coach/deploy}\nBACKUP_DIR=${BACKUP_DIR:-/volume1/backups/coach}\nDOCKER=/usr/local/bin/docker # not on sudo's PATH on DSM\n\n# -O: legacy scp protocol, which works without enabling SFTP in DSM.\nscp -O dist/coach-api.tar compose.yaml serve.json backup.sh restore-check.sh \"$NAS:$REMOTE_DIR/\"\nssh \"$NAS\" \"mkdir -p $REMOTE_DIR/sql\"\nscp -O sql/*.sql \"$NAS:$REMOTE_DIR/sql/\"\n# The very first deploy has no database to back up yet.\nssh -t \"$NAS\" \"set -e; cd $REMOTE_DIR\n  if sudo $DOCKER ps --format '{{.Names}}' | grep -qx coach-db; then\n    sudo sh backup.sh $BACKUP_DIR\n  else\n    echo 'no running database, skipping the backup'\n  fi\n  sudo $DOCKER load -i coach-api.tar\n  rm coach-api.tar\n  sudo $DOCKER compose up -d\"\n"
+   "source": "#!/bin/sh\n# The one command CI may run on the NAS. Installed once by hand as\n# /volume1/docker/coach/bin/coach-deploy (owned by root), and reached only\n# through a forced SSH command plus a sudoers rule; see deploy/README.md.\n#\n#   coach-deploy <dev|prod> <commit-sha> <sha256:image-digest>\n#\n# It fetches deploy/ from this repo at that commit, then hands over to that\n# commit's deploy/deploy.sh. It deploys only commits that are on main and only\n# this repo's image, so a leaked key can't run anything else. Everything else\n# about a deploy lives in deploy.sh and changes with the repo; this file should\n# rarely need reinstalling.\nset -eu\nPATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n\nREPO=nickelsey/coach\nIMAGE=ghcr.io/nickelsey/coach-api\nROOT=/volume1/docker/coach\n\nfail() {\n  echo \"coach-deploy: $*\" >&2\n  exit 1\n}\n\n[ $# -eq 3 ] || fail \"usage: coach-deploy <dev|prod> <commit-sha> <sha256:image-digest>\"\nenv=$1 sha=$2 digest=$3\ncase \"$env\" in dev | prod) ;; *) fail \"environment must be dev or prod\" ;; esac\necho \"$sha\" | grep -Eqx '[0-9a-f]{40}' || fail \"bad commit sha\"\necho \"$digest\" | grep -Eqx 'sha256:[0-9a-f]{64}' || fail \"bad image digest\"\n[ \"$(id -u)\" -eq 0 ] || fail \"must run as root\"\n[ -f \"$ROOT/$env/.env\" ] || fail \"$ROOT/$env/.env is missing; set the environment up first\"\n\n# GitHub serves commits from forks under the parent repo's URLs, so check the\n# commit is an ancestor of main before trusting its scripts.\ncmp=$(curl -fsS \"https://api.github.com/repos/$REPO/compare/$sha...main\") ||\n  fail \"could not ask GitHub about $sha\"\necho \"$cmp\" | grep -Eq '\"status\": ?\"(ahead|identical)\"' || fail \"$sha is not on main\"\n\nrel=$ROOT/$env/releases/$sha\nif [ ! -d \"$rel\" ]; then\n  tmp=$ROOT/$env/releases/.tmp.$$\n  rm -rf \"$tmp\"\n  mkdir -p \"$tmp\"\n  trap 'rm -rf \"$tmp\"' EXIT\n  curl -fsSL \"https://codeload.github.com/$REPO/tar.gz/$sha\" |\n    tar -xz -C \"$tmp\" --strip-components=1 \"coach-$sha/deploy\" ||\n    fail \"could not fetch deploy/ at $sha\"\n  [ -f \"$tmp/deploy/deploy.sh\" ] || fail \"no deploy/deploy.sh at $sha\"\n  mv \"$tmp\" \"$rel\"\n  trap - EXIT\nfi\n\nCOACH_ROOT=$ROOT exec sh \"$rel/deploy/deploy.sh\" \"$env\" \"$sha\" \"$IMAGE@$digest\"\n"
+  },
+  {
+   "path": "deploy/deploy.sh",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 88,
+   "note": "One release to one environment: backup (prod), start, health check, rollback on failure.",
+   "summary": "Deploys one release to one environment on the NAS. Called by coach-deploy\n(deploy/nas/), which CI runs over SSH; not meant to be run directly.\n\ndeploy.sh <dev|prod> <commit-sha> <image>\n\nProd is backed up first, and a failed backup stops the deploy. The new\nversion must answer /healthz with its own commit within a minute; if it\ndoesn't, the previous release is started again and the deploy fails.",
+   "symbols": [],
+   "source": "#!/bin/sh\n# Deploys one release to one environment on the NAS. Called by coach-deploy\n# (deploy/nas/), which CI runs over SSH; not meant to be run directly.\n#\n#   deploy.sh <dev|prod> <commit-sha> <image>\n#\n# Prod is backed up first, and a failed backup stops the deploy. The new\n# version must answer /healthz with its own commit within a minute; if it\n# doesn't, the previous release is started again and the deploy fails.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nROOT=${COACH_ROOT:-/volume1/docker/coach}\nenv=$1 sha=$2 image=$3\nhere=$(cd \"$(dirname \"$0\")\" && pwd)\ndir=$ROOT/$env\n\nfail() {\n  echo \"DEPLOY FAILED: $*\" >&2\n  exit 1\n}\n\n# compose_at <image> <release-dir> <docker compose arguments>\ncompose_at() {\n  c_image=$1 c_rel=$2\n  shift 2\n  COACH_ROOT=$ROOT COACH_API_IMAGE=$c_image COACH_COMPOSE_FILE=$c_rel/deploy/compose.yaml \\\n    sh \"$here/compose.sh\" \"$env\" \"$@\"\n}\n\n# start <image> <release-dir> <version>: brings the project up and waits for\n# the API to report that version.\nstart() {\n  mkdir -p \"$dir/config\"\n  cp \"$2/deploy/config/serve.json\" \"$dir/config/serve.json\"\n  compose_at \"$1\" \"$2\" up -d --remove-orphans || return 1\n  i=0\n  while [ $i -lt 30 ]; do\n    # The API listens only inside the ts container's network namespace.\n    if compose_at \"$1\" \"$2\" exec -T ts wget -qO- http://127.0.0.1:8080/healthz 2>/dev/null |\n      grep -q \"\\\"version\\\":\\\"$3\\\"\"; then\n      return 0\n    fi\n    i=$((i + 1))\n    sleep 2\n  done\n  return 1\n}\n\n[ -f \"$dir/.env\" ] || fail \"$dir/.env is missing\"\n\nprev_sha='' prev_image=''\nif [ -f \"$dir/release.env\" ]; then\n  prev_sha=$(sed -n 's/^COACH_RELEASE=//p' \"$dir/release.env\")\n  prev_image=$(sed -n 's/^COACH_API_IMAGE=//p' \"$dir/release.env\")\nfi\n\ncompose_at \"$image\" \"$here/..\" pull -q api || fail \"could not pull $image\"\n\n# The first deploy of an environment has no database to back up yet.\nif [ \"$env\" = prod ] && [ -n \"$(compose_at \"$image\" \"$here/..\" ps -q db)\" ]; then\n  backup_dir=$(sed -n 's/^BACKUP_DIR=//p' \"$dir/.env\" | tail -1)\n  COACH_ROOT=$ROOT COACH_ENV=prod COACH_API_IMAGE=$image COACH_COMPOSE_FILE=$here/compose.yaml \\\n    sh \"$here/backup.sh\" \"${backup_dir:-/volume1/backups/coach}\" || fail \"backup failed, nothing was changed\"\nfi\n\nif ! start \"$image\" \"$here/..\" \"$sha\"; then\n  compose_at \"$image\" \"$here/..\" logs --tail 40 api >&2 || true\n  if [ -n \"$prev_sha\" ] && [ -d \"$dir/releases/$prev_sha\" ]; then\n    echo \"rolling back to $prev_sha\" >&2\n    start \"$prev_image\" \"$dir/releases/$prev_sha\" \"$prev_sha\" ||\n      fail \"$sha did not come up, and neither did the rollback to $prev_sha\"\n    fail \"$sha did not come up; rolled back to $prev_sha\"\n  fi\n  fail \"$sha did not come up, and there is no previous release to roll back to\"\nfi\n\nprintf 'COACH_RELEASE=%s\\nCOACH_API_IMAGE=%s\\n' \"$sha\" \"$image\" >\"$dir/release.env.tmp\"\nmv \"$dir/release.env.tmp\" \"$dir/release.env\"\nln -sfn \"releases/$sha\" \"$dir/current\"\n\n# Keep the five most recently deployed releases.\ntouch \"$dir/releases/$sha\"\n# shellcheck disable=SC2012 # the names are commit hashes\nls -t \"$dir/releases\" | tail -n +6 | while read -r old; do\n  rm -rf \"${dir:?}/releases/$old\"\ndone\necho \"deployed $sha to $env\"\n"
+  },
+  {
+   "path": "deploy/compose.sh",
+   "group": "deploy",
+   "lang": "bash",
+   "lines": 29,
+   "note": "docker compose for one environment, with the right project, env file and release.",
+   "summary": "Runs docker compose for one environment on the NAS, with the right project\nname, env file and release. Use it for anything by hand, as root:\n\ncompose.sh prod ps\ncompose.sh dev logs -f api\ncompose.sh prod restart ts\n\nEach environment lives in $COACH_ROOT/<env>/ (see deploy/README.md).",
+   "symbols": [],
+   "source": "#!/bin/sh\n# Runs docker compose for one environment on the NAS, with the right project\n# name, env file and release. Use it for anything by hand, as root:\n#\n#   compose.sh prod ps\n#   compose.sh dev logs -f api\n#   compose.sh prod restart ts\n#\n# Each environment lives in $COACH_ROOT/<env>/ (see deploy/README.md).\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nROOT=${COACH_ROOT:-/volume1/docker/coach}\nenv=${1:?usage: compose.sh <dev|prod> <docker compose arguments>}\nshift\ncase \"$env\" in dev | prod) ;; *) echo \"environment must be dev or prod\" >&2; exit 2 ;; esac\ndir=$ROOT/$env\n\n# release.env records what is deployed. deploy.sh overrides both of these\n# while a deploy is in progress.\nif [ -z \"${COACH_API_IMAGE:-}\" ]; then\n  # shellcheck disable=SC1091\n  . \"$dir/release.env\"\nfi\nexport COACH_API_IMAGE\nexport CONFIG_DIR=\"$dir/config\"\n\nexec docker compose -p \"coach-$env\" --env-file \"$dir/.env\" \\\n  -f \"${COACH_COMPOSE_FILE:-$dir/current/deploy/compose.yaml}\" \"$@\"\n"
   },
   {
    "path": "deploy/backup.sh",
    "group": "deploy",
    "lang": "bash",
-   "lines": 21,
+   "lines": 22,
    "note": "Nightly pg_dump with 30-day retention.",
-   "summary": "Nightly Postgres dump. On the Synology, run it from\nControl Panel > Task Scheduler as root, e.g.:\n/volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\nand include that folder in a Hyper Backup task for an off-box copy.",
+   "summary": "Nightly Postgres dump. On the Synology, run it from\nControl Panel > Task Scheduler as root, e.g.:\n/volume1/docker/coach/prod/current/deploy/backup.sh /volume1/backups/coach\nand include that folder in a Hyper Backup task for an off-box copy.",
    "symbols": [],
-   "source": "#!/bin/sh\n# Nightly Postgres dump. On the Synology, run it from\n# Control Panel > Task Scheduler as root, e.g.:\n#   /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach\n# and include that folder in a Hyper Backup task for an off-box copy.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}\nKEEP_DAYS=${2:-30}\nDB=${COACH_DB_CONTAINER:-coach-db}\n\nmkdir -p \"$BACKUP_DIR\"\nout=\"$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump\"\n\n# Custom format (-Fc) is compressed and restores with pg_restore.\ndocker exec \"$DB\" pg_dump -U coach -d coach -Fc > \"$out.tmp\"\nmv \"$out.tmp\" \"$out\"\n\nfind \"$BACKUP_DIR\" -name 'coach-*.dump' -mtime +\"$KEEP_DAYS\" -delete\necho \"wrote $out\"\n"
+   "source": "#!/bin/sh\n# Nightly Postgres dump. On the Synology, run it from\n# Control Panel > Task Scheduler as root, e.g.:\n#   /volume1/docker/coach/prod/current/deploy/backup.sh /volume1/backups/coach\n# and include that folder in a Hyper Backup task for an off-box copy.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}\nKEEP_DAYS=${2:-30}\nENV=${COACH_ENV:-prod}\nhere=$(dirname \"$0\")\n\nmkdir -p \"$BACKUP_DIR\"\nout=\"$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump\"\n\n# Custom format (-Fc) is compressed and restores with pg_restore.\nsh \"$here/compose.sh\" \"$ENV\" exec -T db pg_dump -U coach -d coach -Fc > \"$out.tmp\"\nmv \"$out.tmp\" \"$out\"\n\nfind \"$BACKUP_DIR\" -name 'coach-*.dump' -mtime +\"$KEEP_DAYS\" -delete\necho \"wrote $out\"\n"
   },
   {
    "path": "deploy/restore-check.sh",
    "group": "deploy",
    "lang": "bash",
-   "lines": 52,
+   "lines": 58,
    "note": "Weekly proof that backups work: restores the newest dump into a scratch database and compares row counts.",
-   "summary": "Weekly proof that the backups work: restores the newest dump into a scratch\ndatabase and compares it with the live one. Never touches the live database.\nOn the Synology, run it from Control Panel > Task Scheduler as root, with\n\"send run details by email only when the script terminates abnormally\":\n/volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n\nFails (exit 1) if the newest dump is missing, too old, won't restore, or has\nfar fewer rows than the live database.",
+   "summary": "Weekly proof that the backups work: restores the newest dump into a scratch\ndatabase and compares it with the live one. Never touches the live database.\nOn the Synology, run it from Control Panel > Task Scheduler as root, with\n\"send run details by email only when the script terminates abnormally\":\n/volume1/docker/coach/prod/current/deploy/restore-check.sh /volume1/backups/coach\n\nFails (exit 1) if the newest dump is missing, too old, won't restore, or has\nfar fewer rows than the live database.",
    "symbols": [],
-   "source": "#!/bin/sh\n# Weekly proof that the backups work: restores the newest dump into a scratch\n# database and compares it with the live one. Never touches the live database.\n# On the Synology, run it from Control Panel > Task Scheduler as root, with\n# \"send run details by email only when the script terminates abnormally\":\n#   /volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n#\n# Fails (exit 1) if the newest dump is missing, too old, won't restore, or has\n# far fewer rows than the live database.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: restore-check.sh <backup-dir> [max-age-hours]}\nMAX_AGE_HOURS=${2:-26}\nDB=${COACH_DB_CONTAINER:-coach-db}\nSCRATCH=coach_restore\n\nfail() {\n  echo \"RESTORE CHECK FAILED: $*\" >&2\n  exit 1\n}\n\npsql_at() { # psql_at <database> <sql>\n  docker exec \"$DB\" psql -U coach -d \"$1\" -v ON_ERROR_STOP=1 -tAc \"$2\"\n}\n\nlatest=$(ls -t \"$BACKUP_DIR\"/coach-*.dump 2>/dev/null | head -1)\n[ -n \"$latest\" ] || fail \"no dumps in $BACKUP_DIR\"\n[ -z \"$(find \"$latest\" -mmin +$((MAX_AGE_HOURS * 60)))\" ] ||\n  fail \"newest dump is older than $MAX_AGE_HOURS hours: $latest\"\n\ntrap 'docker exec \"$DB\" dropdb -U coach --if-exists \"$SCRATCH\" >/dev/null 2>&1 || true' EXIT\ndocker exec \"$DB\" dropdb -U coach --if-exists \"$SCRATCH\"\ndocker exec \"$DB\" createdb -U coach \"$SCRATCH\"\ndocker exec -i \"$DB\" pg_restore -U coach -d \"$SCRATCH\" --exit-on-error <\"$latest\" ||\n  fail \"pg_restore could not restore $latest\"\n\ntables=$(psql_at coach \"select tablename from pg_tables where schemaname = 'public' order by 1\")\n[ -n \"$tables\" ] || fail \"live database has no tables\"\n\nfor t in $tables; do\n  live=$(psql_at coach \"select count(*) from \\\"$t\\\"\")\n  rest=$(psql_at \"$SCRATCH\" \"select count(*) from \\\"$t\\\"\") || fail \"$t is missing from the restore\"\n  # The live table may have grown since the dump, so allow some slack: the\n  # larger of 50 rows or 10%.\n  slack=$((live / 10))\n  [ \"$slack\" -ge 50 ] || slack=50\n  [ \"$rest\" -ge $((live - slack)) ] || fail \"$t looks short: $rest restored, $live live\"\n  [ \"$live\" -eq 0 ] || [ \"$rest\" -gt 0 ] || fail \"$t restored empty, $live live\"\n  echo \"ok $t: $rest restored, $live live\"\ndone\necho \"restore check passed: $latest\"\n"
+   "source": "#!/bin/sh\n# Weekly proof that the backups work: restores the newest dump into a scratch\n# database and compares it with the live one. Never touches the live database.\n# On the Synology, run it from Control Panel > Task Scheduler as root, with\n# \"send run details by email only when the script terminates abnormally\":\n#   /volume1/docker/coach/prod/current/deploy/restore-check.sh /volume1/backups/coach\n#\n# Fails (exit 1) if the newest dump is missing, too old, won't restore, or has\n# far fewer rows than the live database.\nset -eu\nPATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM\n\nBACKUP_DIR=${1:?usage: restore-check.sh <backup-dir> [max-age-hours]}\nMAX_AGE_HOURS=${2:-26}\nENV=${COACH_ENV:-prod}\nhere=$(dirname \"$0\")\nSCRATCH=coach_restore\n\nfail() {\n  echo \"RESTORE CHECK FAILED: $*\" >&2\n  exit 1\n}\n\ndb() { # db <command and arguments>: runs it in the database container\n  sh \"$here/compose.sh\" \"$ENV\" exec -T db \"$@\"\n}\n\npsql_at() { # psql_at <database> <sql>\n  db psql -U coach -d \"$1\" -v ON_ERROR_STOP=1 -tAc \"$2\"\n}\n\n# shellcheck disable=SC2012 # backup.sh chooses the names\nlatest=$(ls -t \"$BACKUP_DIR\"/coach-*.dump 2>/dev/null | head -1)\n[ -n \"$latest\" ] || fail \"no dumps in $BACKUP_DIR\"\n[ -z \"$(find \"$latest\" -mmin +$((MAX_AGE_HOURS * 60)))\" ] ||\n  fail \"newest dump is older than $MAX_AGE_HOURS hours: $latest\"\n\ntrap 'db dropdb -U coach --if-exists \"$SCRATCH\" >/dev/null 2>&1 || true' EXIT\ndb dropdb -U coach --if-exists \"$SCRATCH\"\ndb createdb -U coach \"$SCRATCH\"\ndb pg_restore -U coach -d \"$SCRATCH\" --exit-on-error <\"$latest\" ||\n  fail \"pg_restore could not restore $latest\"\n\ntables=$(psql_at coach \"select tablename from pg_tables where schemaname = 'public' order by 1\")\n[ -n \"$tables\" ] || fail \"live database has no tables\"\n\nfor t in $tables; do\n  live=$(psql_at coach \"select count(*) from \\\"$t\\\"\")\n  rest=$(psql_at \"$SCRATCH\" \"select count(*) from \\\"$t\\\"\") || fail \"$t is missing from the restore\"\n  # The live table may have grown since the dump, so allow some slack: the\n  # larger of 50 rows or 10%.\n  slack=$((live / 10))\n  [ \"$slack\" -ge 50 ] || slack=50\n  [ \"$rest\" -ge $((live - slack)) ] || fail \"$t looks short: $rest restored, $live live\"\n  [ \"$live\" -eq 0 ] || [ \"$rest\" -gt 0 ] || fail \"$t restored empty, $live live\"\n  echo \"ok $t: $rest restored, $live live\"\ndone\necho \"restore check passed: $latest\"\n"
   },
   {
    "path": "deploy/sql/analyst-role.sql",
@@ -694,27 +756,27 @@
    "lang": "sql",
    "lines": 29,
    "note": "The read-only role for analysis over the tailnet.",
-   "summary": "Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\nagain; it resets the password. Run as the coach user, from deploy/ on the NAS:\n\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\npsql -U coach -d coach < sql/analyst-role.sql\n\nThe password comes from the environment so it stays out of this file and\nout of the process list.",
+   "summary": "Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\nagain; it resets the password. On the NAS, from /volume1/docker/coach/prod/current/deploy:\n\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E sh compose.sh prod exec -T -e ANALYST_PASSWORD db \\\npsql -U coach -d coach < sql/analyst-role.sql\n\nThe password comes from the environment so it stays out of this file and\nout of the process list.",
    "symbols": [],
-   "source": "-- Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\n-- again; it resets the password. Run as the coach user, from deploy/ on the NAS:\n--\n--   read -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\n--   sudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\n--     psql -U coach -d coach < sql/analyst-role.sql\n--\n-- The password comes from the environment so it stays out of this file and\n-- out of the process list.\n\\set ON_ERROR_STOP on\n\\getenv analyst_password ANALYST_PASSWORD\n\\if :{?analyst_password}\n\\else\n  DO $$ BEGIN RAISE EXCEPTION 'ANALYST_PASSWORD is not set'; END $$;\n\\endif\n\nSELECT 'CREATE ROLE analyst LOGIN'\nWHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'analyst')\n\\gexec\n\nALTER ROLE analyst PASSWORD :'analyst_password';\n-- A second lock: the session itself refuses writes.\nALTER ROLE analyst SET default_transaction_read_only = on;\n\nGRANT CONNECT ON DATABASE coach TO analyst;\nGRANT USAGE ON SCHEMA public TO analyst;\nGRANT SELECT ON ALL TABLES IN SCHEMA public TO analyst;\n-- Tables added by later migrations become readable too.\nALTER DEFAULT PRIVILEGES FOR ROLE coach IN SCHEMA public GRANT SELECT ON TABLES TO analyst;\n"
+   "source": "-- Read-only role for analysis over the tailnet (psql, notebooks). Safe to run\n-- again; it resets the password. On the NAS, from /volume1/docker/coach/prod/current/deploy:\n--\n--   read -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\n--   sudo -E sh compose.sh prod exec -T -e ANALYST_PASSWORD db \\\n--     psql -U coach -d coach < sql/analyst-role.sql\n--\n-- The password comes from the environment so it stays out of this file and\n-- out of the process list.\n\\set ON_ERROR_STOP on\n\\getenv analyst_password ANALYST_PASSWORD\n\\if :{?analyst_password}\n\\else\n  DO $$ BEGIN RAISE EXCEPTION 'ANALYST_PASSWORD is not set'; END $$;\n\\endif\n\nSELECT 'CREATE ROLE analyst LOGIN'\nWHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'analyst')\n\\gexec\n\nALTER ROLE analyst PASSWORD :'analyst_password';\n-- A second lock: the session itself refuses writes.\nALTER ROLE analyst SET default_transaction_read_only = on;\n\nGRANT CONNECT ON DATABASE coach TO analyst;\nGRANT USAGE ON SCHEMA public TO analyst;\nGRANT SELECT ON ALL TABLES IN SCHEMA public TO analyst;\n-- Tables added by later migrations become readable too.\nALTER DEFAULT PRIVILEGES FOR ROLE coach IN SCHEMA public GRANT SELECT ON TABLES TO analyst;\n"
   },
   {
    "path": "deploy/.env.example",
    "group": "deploy",
    "lang": "bash",
-   "lines": 15,
-   "note": "Template for the secrets file. The real deploy/.env is git-ignored.",
-   "summary": "Copy to .env and fill in. Never commit .env.",
+   "lines": 22,
+   "note": "Template for each environment's secrets file, which lives only on the NAS.",
+   "summary": "One of these per environment, on the NAS at /volume1/docker/coach/<env>/.env\n(root-owned, mode 600). Never commit a filled-in copy.",
    "symbols": [],
-   "source": "# Copy to .env and fill in. Never commit .env.\n\n# Tailscale auth key for the \"coach\" node (admin console > Settings > Keys).\n# Tag it with tag:coach-prod so the machine never expires. It's only used for\n# the first login; after that the saved state in DATA_DIR is what counts.\nTS_AUTHKEY=\n\n# Generate both with: openssl rand -hex 32\n# (hex keeps them URL-safe, since the password goes into DATABASE_URL)\nPOSTGRES_PASSWORD=\nCOACH_API_TOKEN=\n\n# Where container data lives. On the Synology, use a path on the volume,\n# e.g. /volume1/docker/coach/data\nDATA_DIR=./data\n"
+   "source": "# One of these per environment, on the NAS at /volume1/docker/coach/<env>/.env\n# (root-owned, mode 600). Never commit a filled-in copy.\n\n# The machine's name on the tailnet: coach for prod, coach-dev for dev.\nTS_HOSTNAME=coach\n\n# Tailscale auth key for that machine (admin console > Settings > Keys). Tag\n# it tag:coach-prod or tag:coach-dev so the machine never expires. It's only\n# used for the first login; after that the saved state in DATA_DIR counts.\nTS_AUTHKEY=\n\n# Generate both with: openssl rand -hex 32\n# (hex keeps them URL-safe, since the password goes into DATABASE_URL)\n# Use different values in dev and prod.\nPOSTGRES_PASSWORD=\nCOACH_API_TOKEN=\n\n# Where this environment's container data lives.\nDATA_DIR=/volume1/docker/coach/prod/data\n\n# Prod only: where the backup before each deploy goes.\nBACKUP_DIR=/volume1/backups/coach\n"
   },
   {
    "path": "deploy/README.md",
    "group": "deploy",
    "lang": "markdown",
-   "lines": 148,
+   "lines": 318,
    "note": "Setup and operations guide.",
-   "summary": "Three containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`). Nothing is published on the LAN. Clients reach the server at `https://coach.<your-tailnet>.ts.net` over Tailscale.",
+   "summary": "Three containers per environment: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`). Nothing is published on the LAN. Clients reach prod at `https://coach.<your-tailnet>.ts.net` and dev at `https://coach-dev.<your-tailnet>.ts.net`, over Tailscale.",
    "symbols": [
     {
      "kind": "h1",
@@ -725,55 +787,97 @@
     },
     {
      "kind": "h2",
-     "name": "One-time Tailscale setup",
-     "line": 7,
+     "name": "How a deploy works",
+     "line": 8,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
-     "name": "Synology (DS2419+II, DSM 7.2)",
-     "line": 13,
+     "name": "One-time setup",
+     "line": 56,
      "depth": 1,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "1. Tailscale basics",
+     "line": 58,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "2. First image",
+     "line": 63,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "3. Install coach-deploy on the NAS",
+     "line": 71,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "4. Prod",
+     "line": 87,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "5. Dev",
+     "line": 121,
+     "depth": 2,
+     "doc": ""
+    },
+    {
+     "kind": "h3",
+     "name": "6. Let CI deploy",
+     "line": 133,
+     "depth": 2,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Backups",
-     "line": 41,
+     "line": 204,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Tailscale tags and access",
-     "line": 84,
+     "line": 251,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Local development (Mac)",
-     "line": 103,
+     "line": 270,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Analysis access",
-     "line": 122,
+     "line": 289,
      "depth": 1,
      "doc": ""
     },
     {
      "kind": "h2",
      "name": "Moving to a Mac mini later",
-     "line": 144,
+     "line": 312,
      "depth": 1,
      "doc": ""
     }
    ],
-   "source": "# Deploying the backend\n\nThree containers: Tailscale (`ts`), Postgres (`db`) and the Go API (`api`).\nNothing is published on the LAN. Clients reach the server at\n`https://coach.<your-tailnet>.ts.net` over Tailscale.\n\n## One-time Tailscale setup\n\n1. In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates** (DNS page).\n2. Create an auth key (Settings > Keys) and put it in `.env` as `TS_AUTHKEY`.\n3. Install Tailscale on the iPhone and the laptop, signed in to the same tailnet.\n\n## Synology (DS2419+II, DSM 7.2)\n\n1. Install **Container Manager** from Package Center.\n2. Copy the repo to the NAS, e.g. `/volume1/docker/coach` (the `server/` and `deploy/` folders are what's needed).\n3. In `deploy/`, `cp .env.example .env` and fill it in. Set `DATA_DIR=/volume1/docker/coach/data`.\n4. Build the API image **on the Mac** and load it onto the NAS (enable SSH in Control Panel > Terminal first):\n\n   ```sh\n   deploy/build-image.sh you@nas-hostname\n   ```\n\n   This cross-builds for linux/amd64, copies the image over, loads it and runs\n   `docker compose up -d`. It asks for your NAS password for sudo.\n   Without an argument it only writes `deploy/dist/coach-api.tar`, which you can\n   load through Container Manager > Image > Add > From file instead.\n\n   **Don't build on the NAS.** DSM's kernel has no seccomp support, so\n   `docker compose up --build` (or a Container Manager project build) fails with\n   `seccomp: config provided but seccomp not supported`. Running containers works fine.\n5. Check it's up from the laptop: `curl https://coach.<tailnet>.ts.net/healthz` should return `{\"status\":\"ok\"}`.\n   The first request can take a few seconds while the certificate is issued.\n6. Schedule `backup.sh` (see the comment at the top of it).\n7. Schedule `restore-check.sh` weekly (see [Backups](#backups)).\n\nTo deploy later, run `deploy/build-image.sh you@nas-hostname` again. It copies\nthe deploy files too, and backs up the database before restarting anything. If\nthe backup fails, nothing is deployed.\n\n## Backups\n\n`backup.sh` writes a nightly dump, and `restore-check.sh` proves the dumps work.\nThe check restores the newest dump into a scratch database and compares row\ncounts with the live one. It fails if the dump is missing, more than 26 hours\nold, unreadable, or well short of the live data.\n\nRun it once by hand on the NAS, from `deploy/`:\n\n```sh\nsudo sh restore-check.sh /volume1/backups/coach\n```\n\nThen add a weekly task in Control Panel > Task Scheduler, as root, with\n**Send run details by email** and **only when the script terminates\nabnormally** ticked (this needs DSM's email notifications set up):\n\n```sh\n/volume1/docker/coach/deploy/restore-check.sh /volume1/backups/coach\n```\n\nTo check that the email arrives, point a one-off run at a broken dump:\n\n```sh\nmkdir /volume1/backups/coach-broken\nhead -c 4096 \"$(ls -t /volume1/backups/coach/coach-*.dump | head -1)\" \\\n  > /volume1/backups/coach-broken/coach-broken.dump\n```\n\nTemporarily set the task's path to `/volume1/backups/coach-broken`, run it from\nTask Scheduler, then set it back and delete that folder.\n\nTo restore for real, stop the API and replace the database from a dump:\n\n```sh\nsudo /usr/local/bin/docker compose stop api\nsudo /usr/local/bin/docker exec coach-db dropdb -U coach --force coach\nsudo /usr/local/bin/docker exec coach-db createdb -U coach coach\nsudo /usr/local/bin/docker exec -i coach-db pg_restore -U coach -d coach --exit-on-error \\\n  < /volume1/backups/coach/coach-YYYYMMDD-HHMMSS.dump\nsudo /usr/local/bin/docker compose start api\n```\n\n## Tailscale tags and access\n\nTagged machines don't expire, and tags are what the access policy refers to.\nDo these in order, so nothing loses access halfway:\n\n1. In the admin console's Access Controls page, add the `tagOwners` block from\n   `tailscale-policy.example.hujson`, leaving your existing rules alone.\n2. On the Machines page, open the `coach` machine's menu and use **Edit ACL\n   tags** to add `tag:coach-prod`. Check it now shows **Expiry disabled**, and\n   that the phone still syncs.\n3. Create a new auth key tagged `tag:coach-prod` and put it in `.env` as\n   `TS_AUTHKEY`, for rebuilding the machine later.\n4. Replace the default allow-everything rule with the `grants` and `hosts` from\n   the example, filling in the laptop's Tailscale IP. Keep any rules you added\n   for other machines.\n5. Check it: the laptop can reach `coach.<tailnet>.ts.net:5432` with\n   `nc -z coach.<tailnet>.ts.net 5432`, and the phone still syncs but can't\n   open that port.\n\n## Local development (Mac)\n\nUse the same compose file with Docker Desktop running and a separate auth key\n(it shows up as another `coach` node, e.g. `coach-1`). Or run only Postgres\nand the API directly:\n\n```sh\ndocker run -d --name coach-dev-db -e POSTGRES_PASSWORD=dev -p 127.0.0.1:5432:5432 postgres:17.11\ncd server\nDATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable \\\nCOACH_API_TOKEN=$(openssl rand -hex 32) go run ./cmd/api\n```\n\nIntegration tests need a disposable database. They drop the schema:\n\n```sh\nCOACH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable go test ./...\n```\n\n## Analysis access\n\nPostgres is forwarded on the tailnet at `coach.<tailnet>.ts.net:5432`, for\npsql, Python notebooks and the like. Use the read-only `analyst` role, not the\n`coach` user the API uses. Create it once on the NAS, from `deploy/` (the\npassword prompt is silent; `openssl rand -hex 32` makes a good one):\n\n```sh\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \\\n  psql -U coach -d coach < sql/analyst-role.sql\nunset ANALYST_PASSWORD\n```\n\nThen connect from the laptop:\n\n```sh\npsql \"postgres://analyst@coach.<tailnet>.ts.net:5432/coach?sslmode=disable\"\n```\n\nThe tailnet encrypts the connection, which is why `sslmode=disable` is fine here.\n\n## Moving to a Mac mini later\n\nStop the project, copy `DATA_DIR` and `.env`, and run `docker compose up -d`\non the new machine. The tailnet name stays `coach` as long as the `tailscale`\nstate directory comes along.\n"
+   "source": "# Deploying the backend\n\nThree containers per environment: Tailscale (`ts`), Postgres (`db`) and the Go\nAPI (`api`). Nothing is published on the LAN. Clients reach prod at\n`https://coach.<your-tailnet>.ts.net` and dev at\n`https://coach-dev.<your-tailnet>.ts.net`, over Tailscale.\n\n## How a deploy works\n\n1. A push to `main` that touches `server/` or `deploy/` runs\n   `.github/workflows/server.yml`: tests, then an image build pushed to\n   `ghcr.io/nickelsey/coach-api`. (The NAS can't build images: DSM's kernel has\n   no seccomp support.)\n2. The workflow joins the tailnet and SSHes to the NAS with a key that can run\n   exactly one command, `coach-deploy`, for one environment.\n3. `coach-deploy` checks the commit is on `main`, downloads `deploy/` at that\n   commit from GitHub, and runs that commit's `deploy.sh`. Nothing is copied to\n   the NAS by hand, and the scripts on the NAS always match the running image.\n4. `deploy.sh` backs up prod, starts the new image, and waits for `/healthz` to\n   report the new commit. If it doesn't within a minute, it starts the previous\n   release again and the workflow fails.\n5. Dev deploys on every push. Prod waits for your approval in GitHub, then\n   gets the same image.\n\nOn the NAS, each environment is a folder:\n\n```\n/volume1/docker/coach/\n  bin/coach-deploy         installed once, by hand\n  prod/\n    .env                   secrets and settings (see .env.example)\n    data/                  Postgres and Tailscale state\n    releases/<commit>/     deploy/ from the repo at that commit (last five)\n    current -> releases/<commit>\n    release.env            the commit and image that are live\n  dev/                     the same again\n```\n\nScheduled tasks use `prod/current/deploy/...`, so they follow each deploy.\nFor anything by hand, `compose.sh` wraps `docker compose` with the right\nproject and files:\n\n```sh\ncd /volume1/docker/coach/prod/current/deploy\nsudo sh compose.sh prod ps\nsudo sh compose.sh dev logs -f api\n```\n\nTo deploy or roll back by hand, run `coach-deploy` with a commit and digest\nfrom a workflow run's summary page:\n\n```sh\nsudo /volume1/docker/coach/bin/coach-deploy prod <commit-sha> sha256:<digest>\n```\n\n## One-time setup\n\n### 1. Tailscale basics\n\n1. In the Tailscale admin console, enable **MagicDNS** and **HTTPS certificates** (DNS page).\n2. Install Tailscale on the iPhone and the laptop, signed in to the same tailnet.\n\n### 2. First image\n\nPush to `main` and let the workflow's `test` and `image` jobs finish (the\ndeploy jobs stay off until step 6). Then, on GitHub, open the `coach-api`\npackage's settings and change its visibility to **Public**, so the NAS can pull\nit without a login. The image holds only the compiled server; all secrets stay\nin the `.env` files on the NAS.\n\n### 3. Install coach-deploy on the NAS\n\nNeeds **Container Manager** from Package Center, and SSH enabled in Control\nPanel > Terminal.\n\n```sh\nsudo mkdir -p /volume1/docker/coach/bin\nsudo curl -fsSL -o /volume1/docker/coach/bin/coach-deploy \\\n  https://raw.githubusercontent.com/nickelsey/coach/main/deploy/nas/coach-deploy\nsudo chown root:root /volume1/docker/coach/bin/coach-deploy\nsudo chmod 755 /volume1/docker/coach/bin/coach-deploy\n```\n\nRead it before trusting it: it is the only thing CI can run. It rarely\nchanges; reinstall it the same way if it does.\n\n### 4. Prod\n\n**Moving the existing install** (the one started from `/volume1/docker/coach/deploy`).\nTake a backup first, then stop the old project and move its data and `.env`.\nNothing is deleted, and the tailnet name and certificate carry over with the data:\n\n```sh\ncd /volume1/docker/coach/deploy\nsudo sh backup.sh /volume1/backups/coach\nsudo /usr/local/bin/docker compose down\nsudo mkdir -p /volume1/docker/coach/prod\nsudo mv /volume1/docker/coach/data /volume1/docker/coach/prod/data   # wherever DATA_DIR pointed\nsudo mv .env /volume1/docker/coach/prod/.env\nsudo chown root:root /volume1/docker/coach/prod/.env\nsudo chmod 600 /volume1/docker/coach/prod/.env\n```\n\nEdit `/volume1/docker/coach/prod/.env`: set\n`DATA_DIR=/volume1/docker/coach/prod/data`, and add `TS_HOSTNAME=coach` and\n`BACKUP_DIR=/volume1/backups/coach`. Then deploy, using the commit and digest\nfrom the workflow run's summary:\n\n```sh\nsudo /volume1/docker/coach/bin/coach-deploy prod <commit-sha> sha256:<digest>\ncurl https://coach.<tailnet>.ts.net/healthz   # from the laptop: {\"status\":\"ok\",\"version\":\"<commit-sha>\"}\n```\n\nCheck the phone still syncs, then delete the old `/volume1/docker/coach/deploy`\nand `server` folders, and point any existing backup task at the new path (see\n[Backups](#backups)).\n\n**A fresh install** is the same without the move: create `prod/.env` from\n`.env.example`, then run `coach-deploy`.\n\n### 5. Dev\n\nDev is a second copy with its own tailnet machine, database and secrets. It\nholds test data only; never copy prod's data into it.\n\n1. Create a Tailscale auth key tagged `tag:coach-dev` (add the tag owners from\n   `tailscale-policy.example.hujson` first).\n2. Create `/volume1/docker/coach/dev/.env` from `.env.example` (root-owned,\n   mode 600) with `TS_HOSTNAME=coach-dev`, that key, fresh passwords and\n   `DATA_DIR=/volume1/docker/coach/dev/data`. Leave `BACKUP_DIR` out.\n3. `sudo /volume1/docker/coach/bin/coach-deploy dev <commit-sha> sha256:<digest>`\n\n### 6. Let CI deploy\n\n1. **Put the NAS itself on the tailnet.** Install Tailscale from Package\n   Center, add the `tag:nas` and `tag:ci` owners and grants from\n   `tailscale-policy.example.hujson`, then on the NAS run\n   `sudo tailscale up --advertise-tags=tag:nas`. This is a separate machine\n   from the `coach` containers.\n2. **Give CI a way onto the tailnet.** In the admin console, create an OAuth\n   client (Settings > OAuth clients) with write access to auth keys and the tag\n   `tag:ci`. Runners join as short-lived `tag:ci` machines that can reach\n   only SSH on the NAS.\n3. **Create the deploy user.** In DSM, add a user `coach-deploy` with a long\n   random password you never use, in the `administrators` group (DSM only\n   lets administrators use SSH), and enable the user home service (Control\n   Panel > User & Group > Advanced).\n4. **Make one SSH key per environment**, on the laptop:\n\n   ```sh\n   ssh-keygen -t ed25519 -N '' -C coach-deploy-dev -f coach-deploy-dev\n   ssh-keygen -t ed25519 -N '' -C coach-deploy-prod -f coach-deploy-prod\n   ```\n\n   On the NAS, put the two public keys in\n   `/var/services/homes/coach-deploy/.ssh/authorized_keys`, each tied to its\n   environment, so the dev key can never deploy to prod:\n\n   ```\n   command=\"sudo /volume1/docker/coach/bin/coach-deploy dev $SSH_ORIGINAL_COMMAND\",restrict ssh-ed25519 AAAA... coach-deploy-dev\n   command=\"sudo /volume1/docker/coach/bin/coach-deploy prod $SSH_ORIGINAL_COMMAND\",restrict ssh-ed25519 AAAA... coach-deploy-prod\n   ```\n\n   sshd ignores the file unless the permissions are strict:\n\n   ```sh\n   cd /var/services/homes/coach-deploy\n   sudo chown -R coach-deploy:users .ssh\n   sudo chmod 755 . && sudo chmod 700 .ssh && sudo chmod 600 .ssh/authorized_keys\n   ```\n\n5. **Allow that one command as root**, without a password:\n\n   ```sh\n   echo 'coach-deploy ALL=(root) NOPASSWD: /volume1/docker/coach/bin/coach-deploy' |\n     sudo tee /etc/sudoers.d/coach-deploy\n   sudo chmod 440 /etc/sudoers.d/coach-deploy\n   ```\n\n   A DSM update can remove this file. If deploys start failing with a sudo\n   password prompt, add it again.\n6. **Test it from the laptop.** This should print `coach-deploy: bad commit sha`\n   and nothing else should be possible with the key:\n\n   ```sh\n   ssh -i coach-deploy-dev coach-deploy@<nas-tailscale-ip> nope nope\n   ```\n\n7. **Set up GitHub.** In the repo's settings, create environments `dev` and\n   `prod`, both limited to the `main` branch, and add yourself as a required\n   reviewer on `prod`. Give each environment these secrets:\n\n   | Secret | Value |\n   | --- | --- |\n   | `TS_OAUTH_CLIENT_ID`, `TS_OAUTH_SECRET` | the OAuth client from step 2 |\n   | `DEPLOY_SSH_KEY` | that environment's private key file |\n   | `NAS_SSH` | `coach-deploy@<nas-tailscale-ip>` |\n   | `NAS_KNOWN_HOSTS` | the output of `ssh-keyscan -t ed25519 <nas-tailscale-ip>` |\n\n   Then delete the private key files from the laptop, and add a repository\n   variable `DEPLOY_ENABLED` set to `true`. The next push to `main` deploys to\n   dev and waits for your approval for prod.\n\n## Backups\n\n`backup.sh` writes a nightly dump, and `restore-check.sh` proves the dumps work.\nThe check restores the newest dump into a scratch database and compares row\ncounts with the live one. It fails if the dump is missing, more than 26 hours\nold, unreadable, or well short of the live data.\n\nBoth run from Control Panel > Task Scheduler as root. The nightly backup:\n\n```sh\n/volume1/docker/coach/prod/current/deploy/backup.sh /volume1/backups/coach\n```\n\nInclude `/volume1/backups/coach` in a Hyper Backup task for an off-box copy.\nEvery prod deploy also takes a backup first, and stops if it fails.\n\nThe weekly restore check, with\n**Send run details by email** and **only when the script terminates\nabnormally** ticked (this needs DSM's email notifications set up):\n\n```sh\n/volume1/docker/coach/prod/current/deploy/restore-check.sh /volume1/backups/coach\n```\n\nTo check that the email arrives, point a one-off run at a broken dump:\n\n```sh\nmkdir /volume1/backups/coach-broken\nhead -c 4096 \"$(ls -t /volume1/backups/coach/coach-*.dump | head -1)\" \\\n  > /volume1/backups/coach-broken/coach-broken.dump\n```\n\nTemporarily set the task's path to `/volume1/backups/coach-broken`, run it from\nTask Scheduler, then set it back and delete that folder.\n\nTo restore for real, stop the API and replace the database from a dump:\n\n```sh\ncd /volume1/docker/coach/prod/current/deploy\nsudo sh compose.sh prod stop api\nsudo sh compose.sh prod exec -T db dropdb -U coach --force coach\nsudo sh compose.sh prod exec -T db createdb -U coach coach\nsudo sh compose.sh prod exec -T db pg_restore -U coach -d coach --exit-on-error \\\n  < /volume1/backups/coach/coach-YYYYMMDD-HHMMSS.dump\nsudo sh compose.sh prod start api\n```\n\n## Tailscale tags and access\n\nTagged machines don't expire, and tags are what the access policy refers to.\nDo these in order, so nothing loses access halfway:\n\n1. In the admin console's Access Controls page, add the `tagOwners` block from\n   `tailscale-policy.example.hujson`, leaving your existing rules alone.\n2. On the Machines page, open the `coach` machine's menu and use **Edit ACL\n   tags** to add `tag:coach-prod`. Check it now shows **Expiry disabled**, and\n   that the phone still syncs.\n3. Create a new auth key tagged `tag:coach-prod` and put it in `prod/.env` as\n   `TS_AUTHKEY`, for rebuilding the machine later.\n4. Replace the default allow-everything rule with the `grants` and `hosts` from\n   the example, filling in the laptop's Tailscale IP. Keep any rules you added\n   for other machines.\n5. Check it: the laptop can reach `coach.<tailnet>.ts.net:5432` with\n   `nc -z coach.<tailnet>.ts.net 5432`, and the phone still syncs but can't\n   open that port.\n\n## Local development (Mac)\n\nTo run the whole stack, fill in a `deploy/.env` with its own auth key and\n`TS_HOSTNAME`, then `docker compose -p coach-local --env-file .env up --build`\nfrom `deploy/`. Usually it's enough to run only Postgres and the API directly:\n\n```sh\ndocker run -d --name coach-dev-db -e POSTGRES_PASSWORD=dev -p 127.0.0.1:5432:5432 postgres:17.11\ncd server\nDATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable \\\nCOACH_API_TOKEN=$(openssl rand -hex 32) go run ./cmd/api\n```\n\nIntegration tests need a disposable database. They drop the schema:\n\n```sh\nCOACH_TEST_DATABASE_URL=postgres://postgres:dev@localhost:5432/postgres?sslmode=disable go test ./...\n```\n\n## Analysis access\n\nPostgres is forwarded on the tailnet at `coach.<tailnet>.ts.net:5432`, for\npsql, Python notebooks and the like. Use the read-only `analyst` role, not the\n`coach` user the API uses. Create it once on the NAS, from\n`/volume1/docker/coach/prod/current/deploy` (the\npassword prompt is silent; `openssl rand -hex 32` makes a good one):\n\n```sh\nread -rs ANALYST_PASSWORD; export ANALYST_PASSWORD\nsudo -E sh compose.sh prod exec -T -e ANALYST_PASSWORD db \\\n  psql -U coach -d coach < sql/analyst-role.sql\nunset ANALYST_PASSWORD\n```\n\nThen connect from the laptop:\n\n```sh\npsql \"postgres://analyst@coach.<tailnet>.ts.net:5432/coach?sslmode=disable\"\n```\n\nThe tailnet encrypts the connection, which is why `sslmode=disable` is fine here.\n\n## Moving to a Mac mini later\n\nStop each environment (`compose.sh <env> down`), copy `/volume1/docker/coach`\nacross, install Docker, and repeat step 6 for the new machine. The tailnet\nnames stay the same as long as the `data/tailscale` folders come along. The\nscripts assume `/volume1/docker/coach`. If that changes, set `ROOT` in\n`coach-deploy`, and `COACH_ROOT` for scheduled tasks and `compose.sh`.\n"
   },
   {
    "path": "ios/Coach/Data/AppDatabase.swift",
@@ -2435,14 +2539,14 @@
   }
  ],
  "linesByLang": {
-  "go": 846,
+  "go": 858,
   "sql": 48,
-  "dockerfile": 14,
+  "dockerfile": 16,
   "go-mod": 13,
-  "yaml": 127,
+  "yaml": 266,
   "json": 13,
-  "bash": 130,
-  "markdown": 347,
+  "bash": 272,
+  "markdown": 517,
   "swift": 2080
  },
  "unlisted": []

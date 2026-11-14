@@ -5,6 +5,9 @@
   "tagOwners": {
     "tag:coach-prod": ["autogroup:admin"],
     "tag:coach-dev":  ["autogroup:admin"],
+    // The NAS itself (Synology's Tailscale package) and GitHub Actions runners.
+    "tag:nas": ["autogroup:admin"],
+    "tag:ci":  ["autogroup:admin"],
   },
 
   // The laptop's Tailscale IP, from the Machines page.
@@ -16,8 +19,13 @@
     // Your own devices keep reaching each other as they do today.
     { "src": ["autogroup:member"], "dst": ["autogroup:self"], "ip": ["*"] },
     // The API: phone and laptop.
-    { "src": ["autogroup:member"], "dst": ["tag:coach-prod"], "ip": ["443"] },
+    { "src": ["autogroup:member"], "dst": ["tag:coach-prod", "tag:coach-dev"], "ip": ["443"] },
     // Postgres: the laptop only.
-    { "src": ["laptop"], "dst": ["tag:coach-prod"], "ip": ["5432"] },
+    { "src": ["laptop"], "dst": ["tag:coach-prod", "tag:coach-dev"], "ip": ["5432"] },
+    // Deploys: CI reaches SSH on the NAS and nothing else.
+    { "src": ["tag:ci"], "dst": ["tag:nas"], "ip": ["22"] },
+    // A tagged NAS no longer counts as one of your own devices, so say what
+    // you may reach on it. Narrow this if you like.
+    { "src": ["autogroup:member"], "dst": ["tag:nas"], "ip": ["*"] },
   ],
 }

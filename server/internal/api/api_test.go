@@ -37,7 +37,7 @@ func (f *fakeSyncer) Pull(_ context.Context, since int64, limit int) (store.Pull
 
 func newTestServer(t *testing.T, s Syncer) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(New(s, testToken, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	srv := httptest.NewServer(New(s, testToken, "test-version", slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -61,8 +61,14 @@ func do(t *testing.T, method, url, token, body string) *http.Response {
 
 func TestHealthzNeedsNoToken(t *testing.T) {
 	srv := newTestServer(t, &fakeSyncer{})
-	if resp := do(t, "GET", srv.URL+"/healthz", "", ""); resp.StatusCode != http.StatusOK {
+	resp := do(t, "GET", srv.URL+"/healthz", "", "")
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	// deploy.sh greps for exactly this, so the shape matters.
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `"version":"test-version"`) {
+		t.Fatalf("body = %s, want the version", body)
 	}
 }
 

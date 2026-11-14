@@ -71,10 +71,10 @@
       body: "Any machine on your tailnet. Today it is for analysis and operations; later it is where Claude plans workouts through the MCP server.",
       points: [
         "Postgres is forwarded on the tailnet at <code>coach.&lt;tailnet&gt;.ts.net:5432</code> for psql, notebooks and similar.",
-        "Builds the API image, because the NAS can't build images.",
+        "Deploys happen from GitHub, not from here: a push to main is all the laptop does.",
         "Can call the API directly with the bearer token for debugging.",
       ],
-      files: ["deploy/build-image.sh", "deploy/README.md"],
+      files: [".github/workflows/server.yml", "deploy/README.md"],
     },
     watch: {
       title: "Apple Watch (planned)", status: ["plan", "Planned"],
@@ -91,7 +91,7 @@
         "The API shares this container's network namespace (<code>network_mode: service:ts</code>), which is why 127.0.0.1 reaches it.",
         "Machine state persists in <code>DATA_DIR/tailscale</code>, so the name and certificate survive restarts and a move to new hardware.",
       ],
-      files: ["deploy/compose.yaml", "deploy/serve.json"],
+      files: ["deploy/compose.yaml", "deploy/config/serve.json"],
     },
     api: {
       title: "Go API (api)", status: ["live", "Live"],
@@ -249,11 +249,11 @@
       code: `POST /v1/sync/push\nAuthorization: Bearer ••••\n{<span class="s">"fasts"</span>:[{<span class="s">"id"</span>:<span class="s">"7f1c…"</span>,<span class="s">"started_at"</span>:<span class="s">"2026-11-02T16:30:00.123Z"</span>,<span class="s">"goal_seconds"</span>:57600,…}]}`,
       fails: [["Server not configured", "the badge shows NO LINK CFG and nothing is sent."], ["Offline or VPN off", "the request fails, the badge shows OFFLINE, and the record stays queued for the next attempt."]],
       files: ["ios/Coach/Sync/SyncEngine.swift", "ios/Coach/Sync/SyncTransport.swift"] },
-    { hop: 4, where: "deploy/serve.json", title: "Tailscale terminates HTTPS",
+    { hop: 4, where: "deploy/config/serve.json", title: "Tailscale terminates HTTPS",
       body: "The Tailscale app on the phone routes coach.<tailnet>.ts.net over WireGuard to the ts container on the NAS. It holds a real Let's Encrypt certificate for that name, terminates TLS and proxies to 127.0.0.1:8080, which is the API because both containers share one network namespace.",
       code: `<span class="s">"Web"</span>: { <span class="s">"\${TS_CERT_DOMAIN}:443"</span>: { <span class="s">"Handlers"</span>: { <span class="s">"/"</span>: { <span class="s">"Proxy"</span>: <span class="s">"http://127.0.0.1:8080"</span> } } } }`,
       fails: [["Node key expired", "the coach machine drops off the tailnet until re-authenticated (see Review)."], ["First request after a restart", "can take a few seconds while the certificate is fetched."]],
-      files: ["deploy/serve.json", "deploy/compose.yaml"] },
+      files: ["deploy/config/serve.json", "deploy/compose.yaml"] },
     { hop: 5, where: "server/internal/api/api.go → store/sync.go → store/fast.go", title: "The API applies last-writer-wins",
       body: "The token is compared in constant time, the JSON is decoded with unknown fields rejected, and every record is validated before anything is written. One transaction takes an advisory lock and upserts each record. The WHERE clause means an equal or older version changes nothing and is reported as stale.",
       code: `<span class="k">ON CONFLICT</span> (id) <span class="k">DO UPDATE SET</span> …, server_seq = nextval(<span class="s">'sync_seq'</span>)\n<span class="k">WHERE</span> fasts.updated_at &lt; EXCLUDED.updated_at`,
@@ -271,8 +271,8 @@
       files: ["ios/Coach/Sync/SyncEngine.swift", "server/internal/store/sync.go"] },
     { hop: 8, where: "deploy/backup.sh via DSM Task Scheduler", title: "Nightly: dump and copy off the box",
       body: "pg_dump writes a compressed custom-format dump to a NAS folder and prunes dumps older than 30 days. Hyper Backup copies that folder elsewhere.",
-      code: `docker exec coach-db pg_dump -U coach -d coach -Fc &gt; coach-20261102-030000.dump`,
-      fails: [["Task not scheduled or failing", "nothing alerts you today."], ["Dump unusable", "never tested; see the restore rehearsal in the Runbook."]],
+      code: `compose.sh prod exec -T db pg_dump -U coach -d coach -Fc &gt; coach-20261102-030000.dump`,
+      fails: [["Task not scheduled or failing", "the weekly restore check fails when the newest dump is over 26 hours old."], ["Dump unusable", "the weekly restore check restores it into a scratch database and emails you if that fails."]],
       files: ["deploy/backup.sh"] },
   ];
 
@@ -333,10 +333,10 @@
   /* ================= RUNBOOK ================= */
   const card = (title, desc, cmd) => h.panel(`<div class="stack"><p class="muted">${desc}</p>${h.cmd(cmd)}</div>`, { title });
   const TROUBLE = [
-    ["NAS build fails with “seccomp: config provided but seccomp not supported”", "DSM's kernel has no seccomp, which Docker needs for RUN steps during a build.", "Build on the Mac with <code>deploy/build-image.sh</code> and load the image. Never run <code>compose up --build</code> on the NAS."],
+    ["NAS build fails with “seccomp: config provided but seccomp not supported”", "DSM's kernel has no seccomp, which Docker needs for RUN steps during a build.", "Images are built in GitHub Actions and pulled by the NAS. Never run <code>compose up --build</code> on the NAS."],
     ["App shows OFFLINE", "The phone can't reach coach.&lt;tailnet&gt;.ts.net. Most often the Tailscale VPN is off on the phone.", "Turn on Tailscale on the phone, then pull to refresh by reopening the app. Settings › TEST LINK shows the exact error."],
     ["TEST LINK: “Server address isn't a valid https:// URL”", "The address is missing <code>https://</code> or has a typo.", "Use the full <code>https://coach.&lt;tailnet&gt;.ts.net</code> form; no port, no path."],
-    ["TEST LINK: “Server returned 401”", "The token in the app doesn't match COACH_API_TOKEN in deploy/.env.", "Paste the token again. If you rotated it, restart the api service first."],
+    ["TEST LINK: “Server returned 401”", "The token in the app doesn't match COACH_API_TOKEN in that environment's .env on the NAS.", "Paste the token again. If you rotated it, restart the api service first."],
     ["api container restarts in a loop", "Usually a missing or short COACH_API_TOKEN, or DATABASE_URL can't connect.", "Read the logs (runbook card above). The first line says which."],
     ["“database not ready” in the API logs", "Postgres was still starting.", "Normal right after the project starts; the API retries for a minute."],
     ["First HTTPS request is slow or fails", "Tailscale is fetching the certificate.", "Retry after a few seconds. MagicDNS and HTTPS certificates must be enabled in the admin console."],
@@ -345,23 +345,24 @@
   ];
   Coach.register({
     id: "runbook", order: 6, group: "walk", title: "Runbook", eyebrow: "Operations",
-    lede: "Commands for running and maintaining what exists. Replace <code>you@nas</code> and <code>&lt;tailnet&gt;</code> with your own values. On DSM, docker lives at /usr/local/bin/docker and needs sudo.",
+    lede: "Commands for running and maintaining what exists. Replace <code>&lt;tailnet&gt;</code> with your own value. The NAS commands need sudo; setup steps are in <code>deploy/README.md</code>.",
     render() {
       return `
         ${h.block("Deploy", `<div class="grid2">
-          ${card("Deploy a new API version", "From the repo on the Mac. Cross-builds for amd64, copies, loads and restarts.", "deploy/build-image.sh you@nas")}
-          ${card("Check the server is up", "No token needed.", "curl https://coach.<tailnet>.ts.net/healthz")}
-          ${card("Read API logs", "Container names come from the Compose project name.", "ssh you@nas 'sudo /usr/local/bin/docker logs --tail 100 coach-api-1'")}
-          ${card("Restart one service", "After changing deploy/.env, for example.", "ssh you@nas 'cd /volume1/docker/coach/deploy && sudo /usr/local/bin/docker compose up -d api'")}
+          ${card("Deploy", "Push to main. GitHub tests, builds and deploys to dev, then waits for your approval before prod.", "jj git push   # then approve the prod deployment on the run's page in GitHub")}
+          ${card("Deploy or roll back by hand", "On the NAS. The commit and digest are on any workflow run's summary page.", "sudo /volume1/docker/coach/bin/coach-deploy prod <commit-sha> sha256:<digest>")}
+          ${card("Check the server is up", "No token needed. The version is the commit that is live.", "curl https://coach.<tailnet>.ts.net/healthz\ncurl https://coach-dev.<tailnet>.ts.net/healthz")}
+          ${card("Read API logs", "On the NAS. compose.sh picks the right project and files for an environment.", "cd /volume1/docker/coach/prod/current/deploy\nsudo sh compose.sh prod logs --tail 100 api")}
+          ${card("Restart one service", "On the NAS, after changing that environment's .env, for example.", "cd /volume1/docker/coach/prod/current/deploy\nsudo sh compose.sh prod up -d api")}
         </div>`)}
         ${h.block("Data", `<div class="grid2">
-          ${card("Query the database", "Over the tailnet. The password is POSTGRES_PASSWORD in deploy/.env.", "psql 'postgres://coach@coach.<tailnet>.ts.net:5432/coach' \\\n  -c 'select id, started_at, ended_at, goal_seconds, server_seq from fasts order by server_seq desc limit 10'")}
-          ${card("Back up now", "On the NAS. The same command the nightly task runs.", "sudo /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach")}
-          ${card("Rehearse a restore", "Restores the newest dump into a scratch database and counts rows, leaving the real one alone.", "D=/usr/local/bin/docker\nsudo $D exec coach-db dropdb -U coach --if-exists coach_restore\nsudo $D exec coach-db createdb -U coach coach_restore\nsudo $D exec -i coach-db pg_restore -U coach -d coach_restore < \"$(ls -t /volume1/backups/coach/*.dump | head -1)\"\nsudo $D exec coach-db psql -U coach -d coach_restore -c 'select count(*) from fasts'")}
-          ${card("Python against Postgres", "For notebooks and analysis. Use a read-only role once phase 1 adds one.", "python3 -m pip install 'psycopg[binary]' pandas\npython3 - <<'EOF'\nimport pandas as pd, psycopg\nconn = psycopg.connect('postgresql://coach:<password>@coach.<tailnet>.ts.net/coach')\nprint(pd.read_sql('select * from fasts', conn))\nEOF")}
+          ${card("Query the database", "Over the tailnet, with the read-only analyst role.", "psql 'postgres://analyst@coach.<tailnet>.ts.net:5432/coach?sslmode=disable' \\\n  -c 'select id, started_at, ended_at, goal_seconds, server_seq from fasts order by server_seq desc limit 10'")}
+          ${card("Back up now", "On the NAS. The same command the nightly task runs.", "sudo /volume1/docker/coach/prod/current/deploy/backup.sh /volume1/backups/coach")}
+          ${card("Check a restore", "Restores the newest dump into a scratch database and compares row counts, leaving the real one alone. The weekly task runs the same command.", "sudo /volume1/docker/coach/prod/current/deploy/restore-check.sh /volume1/backups/coach")}
+          ${card("Python against Postgres", "For notebooks and analysis, with the read-only role.", "python3 -m pip install 'psycopg[binary]' pandas\npython3 - <<'EOF'\nimport pandas as pd, psycopg\nconn = psycopg.connect('postgresql://analyst:<password>@coach.<tailnet>.ts.net/coach')\nprint(pd.read_sql('select * from fasts', conn))\nEOF")}
         </div>`)}
         ${h.block("Secrets", `<div class="grid2">
-          ${card("Rotate the API token", "Then paste the new token into the app's Settings.", "openssl rand -hex 32   # put this in COACH_API_TOKEN in deploy/.env on the NAS\nssh you@nas 'cd /volume1/docker/coach/deploy && sudo /usr/local/bin/docker compose up -d api'")}
+          ${card("Rotate the API token", "Then paste the new token into the app's Settings.", "openssl rand -hex 32   # put this in COACH_API_TOKEN in /volume1/docker/coach/prod/.env\ncd /volume1/docker/coach/prod/current/deploy\nsudo sh compose.sh prod up -d api")}
           ${card("Stop the node key expiring", "Admin console › Machines › coach › ⋯ › Disable key expiry. Or tag the machine.", "# no command: done in the Tailscale admin console")}
         </div>`)}
         ${h.block("Local development", `<div class="grid2">
@@ -435,8 +436,8 @@
       "Tests only run when someone runs them, and the Postgres test is skipped unless a database is set up.",
       "GitHub Actions: Go tests with a Postgres service container, iOS tests on a GitHub-hosted macOS runner (free for a public repo), and an image build. Also the guardrail for agent-written changes."],
     ["plan", "Deploys are manual and there's only one environment", "deploy", "P3",
-      "Every change goes straight to the database holding your real data, by hand from the Mac.",
-      "Dev and prod as two Compose projects on the NAS, with images built in CI and deployed automatically to dev, then promoted to prod."],
+      "Every change went straight to the database holding your real data, by hand from the Mac.",
+      "The pipeline is in the repo: images built in CI, deployed to dev automatically and to prod after approval, with backup and rollback. It takes effect once the one-time NAS setup in deploy/README.md is done."],
     ["plan", "Single-user data model", "data model", "P4",
       "No users table and no user_id on records. Adding them later means migrating every table that exists by then.",
       "Add users and devices now, while there is one table, and scope every query by the authenticated user."],

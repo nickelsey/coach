@@ -1,0 +1,136 @@
+# Tests the server, builds its image, and deploys it to the NAS: dev on every
+# push to main, then prod once the prod environment's reviewer approves.
+#
+# The repo is public, so: pull requests get no secrets and no write access,
+# deploy secrets live in the dev and prod environments (restricted to main),
+# actions are pinned to commits, and nothing here prints a hostname.
+# Setup is in deploy/README.md.
+name: server
+
+on:
+  pull_request:
+    paths: ["server/**", "deploy/**", ".github/workflows/server.yml"]
+  push:
+    branches: [main]
+    paths: ["server/**", "deploy/**", ".github/workflows/server.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_PASSWORD: test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s
+          --health-timeout 2s --health-retries 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Go vet and tests
+        working-directory: server
+        env:
+          COACH_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+        run: |
+          go vet ./...
+          go test ./...
+      - name: Check the deploy scripts
+        run: shellcheck deploy/*.sh deploy/nas/coach-deploy
+
+  image:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: server
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/coach-api:${{ github.sha }}
+          build-args: VERSION=${{ github.sha }}
+          provenance: false
+      - name: Summary
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "Image: \`ghcr.io/$GITHUB_REPOSITORY_OWNER/coach-api@$DIGEST\`"
+            echo
+            echo "To deploy this by hand on the NAS:"
+            echo
+            echo "    sudo /volume1/docker/coach/bin/coach-deploy <dev|prod> $GITHUB_SHA $DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-dev:
+    needs: image
+    # Off until the NAS side is set up; then set the repository variable.
+    if: vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    environment: dev
+    concurrency: deploy-dev
+    steps:
+      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Deploy to dev
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          NAS_SSH: ${{ secrets.NAS_SSH }}
+          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: &deploy |
+          umask 077
+          printf '%s\n' "$DEPLOY_SSH_KEY" > key
+          printf '%s\n' "$NAS_KNOWN_HOSTS" > known_hosts
+          # The key's forced command on the NAS fixes the environment; this
+          # only says which commit and image.
+          ssh -i key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile=known_hosts "$NAS_SSH" "$GITHUB_SHA $DIGEST"
+
+  deploy-prod:
+    needs: [image, deploy-dev]
+    runs-on: ubuntu-24.04
+    environment: prod
+    concurrency: deploy-prod
+    steps:
+      - uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Deploy to prod
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          NAS_SSH: ${{ secrets.NAS_SSH }}
+          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: *deploy

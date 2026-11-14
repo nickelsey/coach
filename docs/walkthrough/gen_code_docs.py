@@ -37,14 +37,17 @@ GROUPS = [
         ("server/Dockerfile", "Two-stage build: cross-compile on the build machine, ship a distroless image."),
         ("server/go.mod", "Module definition. The only dependency is pgx."),
     ]),
-    ("deploy", "Deploy · Synology", "How the server runs: Compose topology, the Tailscale front door, image builds and backups.", [
+    ("deploy", "Deploy · Synology", "How the server runs and how it gets there: the CI workflow, the deploy scripts on the NAS, Compose topology, the Tailscale front door and backups.", [
         ("deploy/compose.yaml", "Three services. ts joins the tailnet; api shares its network namespace; db is reachable only inside the project and via the ts TCP forward."),
-        ("deploy/serve.json", "Tailscale serve config: HTTPS on 443 to the API, TCP 5432 to Postgres."),
-        ("deploy/build-image.sh", "Builds the amd64 API image on the Mac (the NAS can't build) and optionally ships and restarts it."),
+        ("deploy/config/serve.json", "Tailscale serve config: HTTPS on 443 to the API, TCP 5432 to Postgres."),
+        (".github/workflows/server.yml", "CI and delivery: tests, image build, deploy to dev, then prod after approval."),
+        ("deploy/nas/coach-deploy", "The one command CI may run on the NAS. Checks the commit is on main, fetches deploy/ at that commit and hands over to deploy.sh."),
+        ("deploy/deploy.sh", "One release to one environment: backup (prod), start, health check, rollback on failure."),
+        ("deploy/compose.sh", "docker compose for one environment, with the right project, env file and release."),
         ("deploy/backup.sh", "Nightly pg_dump with 30-day retention."),
         ("deploy/restore-check.sh", "Weekly proof that backups work: restores the newest dump into a scratch database and compares row counts."),
         ("deploy/sql/analyst-role.sql", "The read-only role for analysis over the tailnet."),
-        ("deploy/.env.example", "Template for the secrets file. The real deploy/.env is git-ignored."),
+        ("deploy/.env.example", "Template for each environment's secrets file, which lives only on the NAS."),
         ("deploy/README.md", "Setup and operations guide."),
     ]),
     ("ios-data", "iOS · data and sync", "Everything below the UI. Read these before the views.", [
@@ -94,6 +97,8 @@ SOURCE_EXTS = {".go", ".swift", ".sql", ".yaml", ".yml", ".sh"}
 def lang_for(path: Path) -> str:
     if path.name == "Dockerfile":
         return "dockerfile"
+    if path.name == "coach-deploy":  # shell script without an extension
+        return "bash"
     return LANG.get(path.suffix, "plaintext")
 
 

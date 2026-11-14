@@ -1,20 +1,21 @@
 #!/bin/sh
 # Nightly Postgres dump. On the Synology, run it from
 # Control Panel > Task Scheduler as root, e.g.:
-#   /volume1/docker/coach/deploy/backup.sh /volume1/backups/coach
+#   /volume1/docker/coach/prod/current/deploy/backup.sh /volume1/backups/coach
 # and include that folder in a Hyper Backup task for an off-box copy.
 set -eu
 PATH=$PATH:/usr/local/bin # docker isn't on root's PATH on DSM
 
 BACKUP_DIR=${1:?usage: backup.sh <backup-dir> [keep-days]}
 KEEP_DAYS=${2:-30}
-DB=${COACH_DB_CONTAINER:-coach-db}
+ENV=${COACH_ENV:-prod}
+here=$(dirname "$0")
 
 mkdir -p "$BACKUP_DIR"
 out="$BACKUP_DIR/coach-$(date +%Y%m%d-%H%M%S).dump"
 
 # Custom format (-Fc) is compressed and restores with pg_restore.
-docker exec "$DB" pg_dump -U coach -d coach -Fc > "$out.tmp"
+sh "$here/compose.sh" "$ENV" exec -T db pg_dump -U coach -d coach -Fc > "$out.tmp"
 mv "$out.tmp" "$out"
 
 find "$BACKUP_DIR" -name 'coach-*.dump' -mtime +"$KEEP_DAYS" -delete

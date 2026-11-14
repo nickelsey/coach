@@ -27,11 +27,13 @@ type Syncer interface {
 }
 
 // New returns the API handler. Every /v1 route requires the bearer token.
-func New(s Syncer, token string, log *slog.Logger) http.Handler {
+// /healthz is open and reports version, which deploys use to confirm that the
+// new build is the one answering.
+func New(s Syncer, token, version string, log *slog.Logger) http.Handler {
 	h := &handlers{s: s, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": version})
 	})
 
 	v1 := http.NewServeMux()

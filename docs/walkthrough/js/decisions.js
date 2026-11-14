@@ -21,20 +21,20 @@
       need: "Join the Developer Program when phase 5 starts. Nothing before then.",
     },
     {
-      id: "deploy", title: "Deploy mechanism: how CI reaches the NAS", status: "leaning", by: "Phase 3",
+      id: "deploy", title: "Deploy mechanism: how CI reaches the NAS", status: "decided", by: "Phase 3 (built; needs the one-time NAS setup)",
       context: "Images will be built in GitHub Actions and pushed to GitHub's registry. Something then has to tell the NAS to pull and restart, without exposing the NAS to the internet.",
       options: [
         ["SSH over the tailnet with a forced command", "The workflow joins your tailnet as a short-lived tagged machine and SSHes to the NAS. The key can only run deploy.sh, and the ACL allows only that one port. Nothing listens publicly; every deploy is visible in GitHub. Needs Synology's Tailscale package on the host and a deploy user.", "live"],
         ["Self-hosted GitHub runner on the NAS", "Outbound-only and simple to wire up, but the runner executes whatever a workflow says with Docker access, which is root-equivalent on the NAS. On a public repo that is not acceptable: GitHub advises against self-hosted runners there.", "crit"],
         ["Pull-based updater on the NAS", "A scheduled task on the NAS checks the registry and redeploys when a new image appears. No inbound access at all, but promotion and approval live outside GitHub and failures are less visible.", "warn"],
-        ["Keep build-image.sh", "Works today. Manual, needs your Mac, and has no dev environment.", "plan"],
+        ["Keep build-image.sh", "Manual, needed your Mac, and had no dev environment. Removed.", "plan"],
       ],
       rec: "SSH over the tailnet with a forced command. It keeps approvals and logs in GitHub, gives CI exactly one capability, and fits the dev and prod promotion flow.",
-      need: "Nothing blocking. Installing the Synology Tailscale package next to the container-based one is fine; they're separate machines on your tailnet.",
+      need: "The one-time setup in deploy/README.md. Installing the Synology Tailscale package next to the container-based one is fine; they're separate machines on your tailnet. Revisit if you move to a Mac mini with self-hosted runners.",
     },
     {
       id: "envs", title: "Dev and prod environments", status: "leaning", by: "Phase 3",
-      context: "You asked about a dev and a prod environment. The questions are where dev runs and what data it holds.",
+      context: "You asked about a dev and a prod environment. The questions are where dev runs and what data it holds. The deploy scripts now assume both on the NAS.",
       options: [
         ["Both on the NAS, separate Compose projects", "Same hardware and network as prod, so what works in dev works in prod. Separate tailnet machines, databases and data directories. Costs a little NAS memory.", "live"],
         ["Dev on your Mac", "No NAS changes, but only exists while the Mac is awake, and differs from prod (arm64 versus amd64).", "warn"],

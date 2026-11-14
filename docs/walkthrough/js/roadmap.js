@@ -25,12 +25,12 @@
         "A backup taken automatically before each deploy.",
       ],
       impl: [
-        ["Status", `<p>The repo side is done: the scripts, SQL, pinned images and policy template are in <code>deploy/</code>, and <code>deploy/README.md</code> has the steps. What remains happens on the NAS and in the Tailscale console: deploy once, run the first restore check, schedule it, tag the machine, apply the policy and create the analyst role.</p>`],
+        ["Status", `<p>The repo side is done: the scripts, SQL, pinned images and policy template are in <code>deploy/</code>, and <code>deploy/README.md</code> has the steps. The first deploy and restore check are done. What remains happens on the NAS and in the Tailscale console, after the phase 3 setup so the scheduled tasks use the new paths: schedule the restore check, tag the machine, apply the policy and create the analyst role.</p>`],
         ["Restore check script", `<p><code>deploy/restore-check.sh</code> restores the newest dump into a scratch database and compares every public table with the live one, so new tables are covered automatically. It fails if the dump is missing, over 26 hours old, unreadable, or short by more than 50 rows or 10%, whichever is larger. Schedule it weekly in DSM Task Scheduler with “send run details by email only when the script terminates abnormally”.</p>`],
         ["Tailscale tags and ACLs", `<p>Tag the running machine from the admin console; tagged machines don't expire. The compose file now sets <code>TS_AUTH_ONCE</code>, so the container logs in only when it has no saved state and an expired auth key can't keep it off the tailnet after a restart. <code>deploy/tailscale-policy.example.hujson</code> limits the database port to the laptop. The order matters, so follow the README: add the tag owners, tag the machine, then replace the default allow-all rule.</p>`],
-        ["Pin image versions", `<p>Postgres, Tailscale, Go and the distroless base are each pinned to a version and digest. <code>coach-api:latest</code> is the one exception: it is built locally, and phase 3 replaces it with registry digests. Phase 2 adds automated update PRs so pinning doesn't mean falling behind.</p>`],
+        ["Pin image versions", `<p>Postgres, Tailscale, Go and the distroless base are each pinned to a version and digest. The API image is deployed by digest from the registry. Phase 2 adds automated update PRs so pinning doesn't mean falling behind.</p>`],
         ["Read-only analysis role", `<p><code>deploy/sql/analyst-role.sql</code> creates the role and can be run again to change the password, which comes from the environment. Default privileges make future tables readable too, and the role's sessions default to read-only as a second lock.</p>`],
-        ["Backup before deploy (stopgap)", `<p><code>build-image.sh</code> now copies the deploy files to the NAS and runs <code>backup.sh</code> before loading the image. If the backup fails, nothing is deployed. Phase 3 replaces this with the prod deploy script.</p>`],
+        ["Backup before deploy", `<p>Every prod deploy runs <code>backup.sh</code> first, and deploys nothing if the backup fails. This now lives in phase 3's <code>deploy.sh</code>, which replaced <code>build-image.sh</code>.</p>`],
       ],
       done: ["A restore check passes and a deliberately broken one emails you.", "The coach machine shows as tagged with no expiry.", "<code>docker compose config</code> shows no floating third-party tags.", "The analyst role can SELECT but not INSERT; the phone can't reach :5432."],
       learn: "Postgres roles and privileges, Tailscale policy syntax.",
@@ -115,33 +115,11 @@ xcodebuild test -project Coach.xcodeproj -scheme Coach \\
           ["Deployed by", "Every merge to main", "Approval of a dev-tested image"],
           ["Agents", "May deploy", "Never"],
         ])],
-        ["Parameterize the compose file", `<p>Hostnames, image and data paths come from the env file, and the fixed <code>container_name</code> goes away (two projects can't share one).</p>` + code(`services:
-  ts:
-    hostname: \${COACH_TS_HOSTNAME}          # coach-dev / coach
-  api:
-    image: \${COACH_API_IMAGE}                # ghcr.io/nickelsey/coach-api@sha256:…
-  db:
-    volumes: ["\${DATA_DIR}/postgres:/var/lib/postgresql/data"]
-
-# docker compose -p coach-dev --env-file dev.env up -d`)],
-        ["Build in CI, push to GHCR", `<p>On every push to main, build <code>linux/amd64</code> with <code>docker/build-push-action</code> and push <code>ghcr.io/nickelsey/coach-api</code> tagged with the commit and referenced by digest. Make the package public to match the repo: the image holds only the compiled server, with all configuration in the NAS env files, so the NAS can pull without a registry login. This also removes the seccomp workaround from day-to-day use.</p>`],
-        ["How CI reaches the NAS", `<p>Recommended in <a href="#decisions">Decisions › Deploy mechanism</a>: install Synology's Tailscale package on the NAS host as <code>tag:nas</code>. The workflow joins the tailnet with <code>tailscale/github-action</code> as an ephemeral <code>tag:ci</code> machine. The ACL allows only <code>tag:ci → tag:nas:22</code>. The SSH key in <code>authorized_keys</code> is forced to run one script, so CI can do nothing else. Store the NAS hostname as a secret so it is masked in the public run logs:</p>` + code(`command="/volume1/docker/coach/deploy/deploy.sh",no-port-forwarding,no-pty ssh-ed25519 AAAA… ci-deploy`)],
-        ["deploy.sh", code(`#!/bin/sh
-# deploy.sh <dev|prod> <image-digest>   (called only through the forced SSH command)
-set -eu
-set -- $SSH_ORIGINAL_COMMAND
-env=$1; image=$2
-case "$env" in dev|prod) ;; *) echo "bad env"; exit 2 ;; esac
-case "$image" in ghcr.io/nickelsey/coach-api@sha256:*) ;; *) echo "bad image"; exit 2 ;; esac
-cd /volume1/docker/coach/deploy
-[ "$env" = prod ] && ./backup.sh /volume1/backups/coach
-prev=$(cat "state/$env.image" 2>/dev/null || true)
-COACH_API_IMAGE=$image docker compose -p "coach-$env" --env-file "$env.env" up -d api
-if ! ./wait-healthy.sh "$env"; then
-  [ -n "$prev" ] && COACH_API_IMAGE=$prev docker compose -p "coach-$env" --env-file "$env.env" up -d api
-  exit 1
-fi
-echo "$image" > "state/$env.image"`)],
+        ["Status", `<p>The server pipeline was pulled forward and is in the repo: <code>.github/workflows/server.yml</code>, <code>deploy/nas/coach-deploy</code>, <code>deploy/deploy.sh</code> and <code>deploy/compose.sh</code>. It was run end to end locally against a stand-in registry, including a rollback. What remains is the one-time setup in <code>deploy/README.md</code>: move prod into the new layout, create dev, and give CI access. Still to build in this phase: seed data for dev, request logging, the uptime alert and the two iPhone builds.</p>`],
+        ["One compose file, two environments", `<p>The hostname, image, data and config paths come from each environment's <code>.env</code> and from <code>compose.sh</code>, which also sets the project name. On the NAS each environment is a folder under <code>/volume1/docker/coach/</code> holding its <code>.env</code>, its data, the last five releases and a <code>current</code> link that scheduled tasks use.</p>`],
+        ["Build in CI, push to GHCR", `<p>Every push to main that touches the server or deploy files runs the tests, then builds <code>linux/amd64</code> and pushes <code>ghcr.io/nickelsey/coach-api</code>, tagged with the commit and deployed by digest. The package is public to match the repo: the image holds only the compiled server, so the NAS pulls without a registry login. The NAS never builds.</p>`],
+        ["How CI reaches the NAS", `<p>The workflow joins the tailnet as a short-lived <code>tag:ci</code> machine, which the policy lets reach only SSH on the NAS (<code>tag:nas</code>). Each environment has its own SSH key, and each key is forced to run one command for its environment, so the dev key can never touch prod:</p>` + code(`command="sudo /volume1/docker/coach/bin/coach-deploy dev $SSH_ORIGINAL_COMMAND",restrict ssh-ed25519 AAAA… coach-deploy-dev`) + `<p><code>coach-deploy</code> is installed once by hand. It accepts only a commit that is on main and an image digest from this repo's registry, downloads <code>deploy/</code> at that commit from GitHub, and runs that commit's <code>deploy.sh</code>. Nothing is copied to the NAS by hand, and the NAS hostname is a secret so it stays out of the public logs.</p>`],
+        ["deploy.sh", `<p>Backs up prod and stops if the backup fails. Starts the new image and waits for <code>/healthz</code> to report the new commit. If that doesn't happen within a minute, it starts the previous release again and fails the workflow. On success it records the release and moves the <code>current</code> link.</p>`],
         ["Promotion with approval", `<p>Two GitHub Environments. <code>dev</code> deploys automatically after the image job. <code>prod</code> requires your approval and reuses the exact digest that is running on dev, so what you tested is what ships. Required reviewers are free on public repos. Leave “prevent self-review” off, since you are the only reviewer.</p>`],
         ["Migrations across two environments", `<p>Migrations stay forward-only and backward-compatible (expand, then contract in a later release), so an older app keeps working against a newer server. Prod migrations always run after a fresh backup.</p>`],
         ["Logging and uptime", `<p>A Go middleware logging method, path, status, duration and record counts as JSON. For alerts, an Uptime Kuma container in the prod project that checks <code>/healthz</code> on both environments and the age of the newest backup, and notifies you by email, Pushover or Telegram.</p>`],

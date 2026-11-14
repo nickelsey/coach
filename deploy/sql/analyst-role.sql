@@ -1,8 +1,8 @@
 -- Read-only role for analysis over the tailnet (psql, notebooks). Safe to run
--- again; it resets the password. Run as the coach user, from deploy/ on the NAS:
+-- again; it resets the password. On the NAS, from /volume1/docker/coach/prod/current/deploy:
 --
 --   read -rs ANALYST_PASSWORD; export ANALYST_PASSWORD
---   sudo -E /usr/local/bin/docker exec -i -e ANALYST_PASSWORD coach-db \
+--   sudo -E sh compose.sh prod exec -T -e ANALYST_PASSWORD db \
 --     psql -U coach -d coach < sql/analyst-role.sql
 --
 -- The password comes from the environment so it stays out of this file and

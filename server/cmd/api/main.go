@@ -24,6 +24,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// version is the commit this binary was built from, set at build time with
+// -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(log); err != nil {
@@ -60,12 +64,12 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.New(store.New(pool), token, log),
+		Handler:           api.New(store.New(pool), token, version, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Info("listening", "addr", addr)
+	log.Info("listening", "addr", addr, "version", version)
 
 	select {
 	case err := <-errc:

@@ -1,0 +1,53 @@
+#!/bin/sh
+# The one command CI may run on the NAS. Installed once by hand as
+# /volume1/docker/coach/bin/coach-deploy (owned by root), and reached only
+# through a forced SSH command plus a sudoers rule; see deploy/README.md.
+#
+#   coach-deploy <dev|prod> <commit-sha> <sha256:image-digest>
+#
+# It fetches deploy/ from this repo at that commit, then hands over to that
+# commit's deploy/deploy.sh. It deploys only commits that are on main and only
+# this repo's image, so a leaked key can't run anything else. Everything else
+# about a deploy lives in deploy.sh and changes with the repo; this file should
+# rarely need reinstalling.
+set -eu
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+
+REPO=nickelsey/coach
+IMAGE=ghcr.io/nickelsey/coach-api
+ROOT=/volume1/docker/coach
+
+fail() {
+  echo "coach-deploy: $*" >&2
+  exit 1
+}
+
+[ $# -eq 3 ] || fail "usage: coach-deploy <dev|prod> <commit-sha> <sha256:image-digest>"
+env=$1 sha=$2 digest=$3
+case "$env" in dev | prod) ;; *) fail "environment must be dev or prod" ;; esac
+echo "$sha" | grep -Eqx '[0-9a-f]{40}' || fail "bad commit sha"
+echo "$digest" | grep -Eqx 'sha256:[0-9a-f]{64}' || fail "bad image digest"
+[ "$(id -u)" -eq 0 ] || fail "must run as root"
+[ -f "$ROOT/$env/.env" ] || fail "$ROOT/$env/.env is missing; set the environment up first"
+
+# GitHub serves commits from forks under the parent repo's URLs, so check the
+# commit is an ancestor of main before trusting its scripts.
+cmp=$(curl -fsS "https://api.github.com/repos/$REPO/compare/$sha...main") ||
+  fail "could not ask GitHub about $sha"
+echo "$cmp" | grep -Eq '"status": ?"(ahead|identical)"' || fail "$sha is not on main"
+
+rel=$ROOT/$env/releases/$sha
+if [ ! -d "$rel" ]; then
+  tmp=$ROOT/$env/releases/.tmp.$$
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+  trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL "https://codeload.github.com/$REPO/tar.gz/$sha" |
+    tar -xz -C "$tmp" --strip-components=1 "coach-$sha/deploy" ||
+    fail "could not fetch deploy/ at $sha"
+  [ -f "$tmp/deploy/deploy.sh" ] || fail "no deploy/deploy.sh at $sha"
+  mv "$tmp" "$rel"
+  trap - EXIT
+fi
+
+COACH_ROOT=$ROOT exec sh "$rel/deploy/deploy.sh" "$env" "$sha" "$IMAGE@$digest"
