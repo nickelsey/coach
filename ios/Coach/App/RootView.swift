@@ -12,9 +12,9 @@ struct RootView: View {
             GridBackground().ignoresSafeArea()
             switch model.tab {
             case .today: TodayView()
-            case .train: ModulePlaceholder(title: "TRAIN//", accent: Neon.cycling, milestone: "Cycling recording and plans arrive in milestones 3–4.")
+            case .train: ModulePlaceholder(title: "TRAIN//", accent: Neon.cycling, milestone: "Cycling recording and plans arrive in a later release.")
             case .fuel: FastView()
-            case .body: ModulePlaceholder(title: "BODY//", accent: Neon.breathing, milestone: "Health import (sleep, HRV, resting HR) arrives in milestone 5.")
+            case .body: ModulePlaceholder(title: "BODY//", accent: Neon.breathing, milestone: "Health import (sleep, HRV, resting HR) arrives in a later release.")
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {

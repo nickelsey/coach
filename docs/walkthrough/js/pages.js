@@ -7,7 +7,7 @@
   /* ================= OVERVIEW ================= */
   Coach.register({
     id: "overview", order: 1, group: "walk", title: "Overview", eyebrow: "Start here",
-    lede: "A personal, local-first fitness system: an iPhone app that works offline, a small Go API and Postgres on your Synology, and Tailscale as the only way in. Milestone 1 (foundation) and the core of milestone 2 (fasting) are live.",
+    lede: "A personal, local-first fitness system: an iPhone app that works offline, a small Go API and Postgres on your Synology, and Tailscale as the only way in. The foundation and the core of fasting are live.",
     render() {
       const pagesInfo = [
         ["architecture", "The parts, how they connect, the data model, configuration and the trust boundaries."],
@@ -36,7 +36,7 @@
           "Start, end and adjust a fast on the phone, fully offline, with alerts at the goal, one hour before, and optionally every 4 hours.",
           "Changes sync to Postgres on the NAS over HTTPS on your tailnet, and changes made elsewhere sync back. Conflicts resolve to the newest edit.",
           "The server runs as a Compose project on the DS2419+II with nothing exposed on the LAN, a cross-built API image, and a nightly backup script.",
-          "The app has the NEON//OS look from the mockups: chamfered panels, glow, segmented bars, grid and optional scanlines.",
+          "The app has the NEON//OS look: chamfered panels, glow, segmented bars, grid and optional scanlines.",
         ]))}
         ${h.block("Pages", `<div class="grid3 cards">${pagesInfo.map(([id, d]) => {
           const p = Coach.pages.find((x) => x.id === id);

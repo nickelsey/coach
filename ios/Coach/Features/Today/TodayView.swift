@@ -49,7 +49,7 @@ struct TodayView: View {
         }
     }
 
-    // Placeholders until HealthKit import (milestone 5) and plans (milestone 4).
+    // Placeholders until HealthKit import and plans are built.
     private var vitals: some View {
         NeonPanel {
             PanelTitle(text: "VITALS")

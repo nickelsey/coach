@@ -1,6 +1,6 @@
 /* Roadmap page: ordered phases with expandable implementation details.
    Order is the plan: platform work that gets harder later (CI, environments,
-   accounts) comes before features; features follow the spec's milestone order. */
+   accounts) comes before features; features follow in dependency order. */
 (function () {
   "use strict";
   const { h, $, $$ } = Coach;
@@ -173,12 +173,12 @@ WHERE fasts.updated_at < EXCLUDED.updated_at
       agent: "Good for an agent if the isolation tests are written first.",
     },
     {
-      n: 5, title: "Cycling recording", cat: "feature", hours: [17, 27], deps: "P4", milestone: "M3",
+      n: 5, title: "Cycling recording", cat: "feature", hours: [17, 27], deps: "P4",
       why: "The first workout type. It proves the Bluetooth layer, the recording engine and stream storage, which every later workout type reuses.",
       deliver: [
         "Sensor pairing for heart rate, cycling power, speed/cadence and smart trainers, remembered between rides.",
         "A recording engine that survives a locked screen, a crash or a force-quit.",
-        "The live ride screen from the mockups.",
+        "The live ride screen.",
         "Rides saved with a summary, exported to Apple Health once, and synced with their full streams.",
         "The Tymewear question answered, and background sync.",
         "Apple Developer Program membership, with Xcode Cloud shipping both apps to TestFlight.",
@@ -199,9 +199,9 @@ WHERE fasts.updated_at < EXCLUDED.updated_at
         ["Streams storage and sync", `<p>Streams are stored as immutable chunks rather than one row per second: 5 minutes per channel, delta-encoded integers, zlib-compressed (Swift's Compression framework and Go's <code>compress/zlib</code> both speak it). Chunks are insert-only, so sync never has conflicts, and each push stays well under the 5 MB limit.</p>` + code(`recording (id, user_id, type, started_at, ended_at, summary jsonb, healthkit_uuid, â€¦ sync columns)
 recording_chunk (recording_id, channel, chunk_index, start_offset_s, encoding, data bytea)
   channel: power | hr | cadence | speed | rr | breath_rate | ventilation`)],
-        ["Live ride screen", `<p>The approved mockup: 3-second power, HR with zone segments, cadence, breathing if available, sensor status, elapsed time. Keeps the screen awake while recording. Readability was approved, so the work here is wiring, not design.</p>`],
+        ["Live ride screen", `<p>Shows 3-second power, HR with zone segments, cadence, breathing if available, sensor status and elapsed time. Keeps the screen awake while recording. The layout is already settled, so the work here is wiring, not design.</p>`],
         ["Apple Health export", `<p><code>HKWorkoutBuilder</code> with the cycling activity type, heart-rate samples and active energy. The HealthKit UUID is stored on the recording so it is never exported twice. Requires the HealthKit capability and permission prompts.</p>`],
-        ["Tymewear", `<p>Run the nRF Connect scan from the spec. If the breathing characteristic is readable, it becomes a sensor plugin; if not, the fallback is importing the FIT file from Tymewear's own path in phase 7.</p>`],
+        ["Tymewear", `<p>Scan the sensor with nRF Connect and list its services and characteristics. If the breathing characteristic is readable, it becomes a sensor plugin; if not, the fallback is importing the FIT file from Tymewear's own path in phase 7.</p>`],
         ["Background sync", `<p>Register a <code>BGAppRefreshTask</code> that runs a sync. iOS decides when it fires, so it's best-effort.</p>`],
       ],
       done: ["A merge to main reaches Coach Dev on your phone through TestFlight, with your Mac off.", "A 60-minute ride with HR strap and trainer, screen locked for most of it, records completely.", "Force-quitting mid-ride and reopening recovers the ride.", "The ride appears in Apple Health exactly once.", "Its streams can be read back in Python from Postgres."],
@@ -209,14 +209,14 @@ recording_chunk (recording_id, channel, chunk_index, start_offset_s, encoding, d
       agent: "The parsers and the stream encoding are ideal agent tasks: pure functions with byte-level tests. On-device sensor testing is yours.",
     },
     {
-      n: 6, title: "Structured cycling and the MCP server", cat: "feature", hours: [15, 25], deps: "P5", milestone: "M4",
+      n: 6, title: "Structured cycling and the MCP server", cat: "feature", hours: [15, 25], deps: "P5",
       why: "This is where the LLM side starts paying off: Claude can write a plan that the phone can actually run.",
       deliver: [
         "A profile with FTP history and zones.",
         "Plans and scheduled workouts, synced, validated against a versioned JSON schema in both Go and Swift.",
         "The Train tab: calendar and plan detail.",
         "A workout player that shows targets and cues each step (ERG comes in phase 9).",
-        "An MCP server in Go with the tools from the spec.",
+        "An MCP server in Go with tools to read history and write plans.",
         "An incoming-changes review, so plans from Claude never change silently.",
       ],
       impl: [
@@ -226,7 +226,7 @@ workout_plan (id, user_id, type, schema_version, name, body jsonb, review_state,
 scheduled_workout (id, user_id, plan_id, scheduled_for, status, recording_id, â€¦ sync columns)`)],
         ["Workout player", `<p>A state machine over the flattened steps: current step, time remaining, and a target range resolved as FTP Ã— fraction when the ride starts. Haptic and sound cues 5 seconds before each change. Per-step compliance (time in range, average versus target) is stored on the recording.</p>`],
         ["MCP server", `<p>Go, using the official MCP Go SDK, sharing the <code>store</code> package with the API. Served over streamable HTTP at <code>https://coach.&lt;tailnet&gt;.ts.net/mcp</code> behind the same Tailscale machine, authenticated with a device token that has only <code>read</code> and <code>plans:write</code>. Tools: <code>get_profile</code>, <code>list_workouts</code>, <code>get_workout</code>, <code>get_metrics</code>, <code>get_schema</code>, <code>create_plan</code>, <code>update_plan</code>, <code>schedule_workout</code>.</p>`],
-        ["Incoming-changes review", `<p>Plans written by <code>mcp</code> or <code>web</code> arrive with <code>review_state = 'proposed'</code>. The Train tab shows the banner from the mockup; accepting marks them accepted, rejecting soft-deletes them. An agent can propose but never silently rearrange your week.</p>`],
+        ["Incoming-changes review", `<p>Plans written by <code>mcp</code> or <code>web</code> arrive with <code>review_state = 'proposed'</code>. The Train tab shows a review banner; accepting marks them accepted, rejecting soft-deletes them. An agent can propose but never silently rearrange your week.</p>`],
         ["Privacy defaults", `<p>Tools return summaries and aggregates. Raw streams need an explicit <code>get_streams</code> call with a time range, so a casual question doesn't send a month of heart-rate data to the model.</p>`],
       ],
       done: ["â€œSchedule three sweet-spot rides next weekâ€ in Claude produces proposed plans that appear in the app.", "You accept one, ride it with targets and cues, and the recording links to it.", "Claude can then summarize how well you hit the targets."],
@@ -234,7 +234,7 @@ scheduled_workout (id, user_id, plan_id, scheduled_for, status, recording_id, â€
       agent: "Schema, validation and MCP tools suit agents well. The player needs on-device feel testing.",
     },
     {
-      n: 7, title: "Health import", cat: "feature", hours: [6, 10], deps: "P6", milestone: "M5",
+      n: 7, title: "Health import", cat: "feature", hours: [6, 10], deps: "P6",
       why: "Sleep, HRV and resting heart rate are the inputs any later coaching or readiness logic needs, and they fill the Today vitals and the Body tab.",
       deliver: [
         "Incremental import of sleep, HRV, resting HR, weight and other apps' workouts.",
@@ -253,7 +253,7 @@ scheduled_workout (id, user_id, plan_id, scheduled_for, status, recording_id, â€
       agent: "Mapping and storage code suits agents; HealthKit behavior must be checked on a device.",
     },
     {
-      n: 8, title: "Web app v1", cat: "feature", hours: [15, 25], deps: "P6", milestone: "M6",
+      n: 8, title: "Web app v1", cat: "feature", hours: [15, 25], deps: "P6",
       why: "Planning a week, editing a plan and analyzing a ride are easier on a big screen, and this is your TypeScript learning ground.",
       deliver: [
         "A TypeScript web app on the same tailnet address as the API.",
@@ -365,7 +365,7 @@ scheduled_workout (id, user_id, plan_id, scheduled_for, status, recording_id, â€
 
   Coach.register({
     id: "roadmap", order: 9, group: "plan", title: "Roadmap", eyebrow: "Planning",
-    lede: "The plan in order. Platform work that gets more expensive later (hardening, CI, environments, accounts) comes first; features then follow the spec's milestones. Expand any phase for implementation details. Hours are rough ranges for orientation, not commitments.",
+    lede: "The plan in order. Platform work that gets more expensive later (hardening, CI, environments, accounts) comes first; features then follow in the order they build on each other. Expand any phase for implementation details. Hours are rough ranges for orientation, not commitments.",
     render() {
       let cum = 0;
       const rows = PHASES.map((p) => {
@@ -395,7 +395,7 @@ scheduled_workout (id, user_id, plan_id, scheduled_for, status, recording_id, â€
             <div class="rail"><div class="num">P${p.n}</div></div>
             <div class="body"><details${p.now ? " open" : ""}>
               <summary>
-                <div class="ttl"><h3>${esc(p.title)}</h3>${h.chip(CATS[p.cat][1], CATS[p.cat][0])}${p.milestone ? h.chip("plan", "spec " + p.milestone) : ""}${p.now ? h.chip("crit", "Next up") : ""}<span class="open-ind"></span></div>
+                <div class="ttl"><h3>${esc(p.title)}</h3>${h.chip(CATS[p.cat][1], CATS[p.cat][0])}${p.now ? h.chip("crit", "Next up") : ""}<span class="open-ind"></span></div>
                 <p class="why">${esc(p.why)}</p>
                 <div class="facts"><span>effort <b>${p.hours[0]}â€“${p.hours[1]} h</b></span><span>needs <b>${esc(p.deps)}</b></span></div>
               </summary>
