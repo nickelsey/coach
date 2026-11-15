@@ -82,10 +82,6 @@ GROUPS = [
         ("ios/project.yml", "XcodeGen spec. Edit this, not the .xcodeproj."),
         ("ios/README.md", "Build, test and run instructions."),
     ]),
-    ("docs", "Project docs", "Decisions and the original notes.", [
-        ("spec.md", "The living spec: decisions, architecture, workout schema, data model, milestones."),
-        ("inital_spec.md", "The original one-page idea."),
-    ]),
 ]
 
 LANG = {".go": "go", ".swift": "swift", ".sql": "sql", ".yaml": "yaml", ".yml": "yaml",

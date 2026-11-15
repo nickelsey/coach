@@ -48,7 +48,6 @@
           ["<code>deploy/</code>", "Compose project, Tailscale serve config, image build and backup scripts", "YAML, shell"],
           ["<code>ios/</code>", "XcodeGen project, app sources (App, Data, Sync, Theme, Features), tests", "Swift"],
           ["<code>docs/walkthrough/</code>", "This site and the generator that builds the Code page from the sources", "HTML/JS, Python"],
-          ["<code>spec.md</code>", "Living spec: decisions, architecture, workout schema, data model, milestones", "Markdown"],
         ]))}`;
     },
   });
@@ -124,7 +123,7 @@
       title: "MCP server and web app (planned)", status: ["plan", "Planned"],
       body: "The MCP server will let Claude read history and write structured plans; the web app will be the calendar, plan editor and analysis view. Both run in the same Compose project behind the same Tailscale machine.",
       points: ["MCP in Go, sharing the store package with the API (phase 6).", "Web app in TypeScript (phase 8).", "Plan changes from either appear on the phone as an incoming-changes review."],
-      files: ["spec.md"],
+      files: [],
     },
   };
   const WIRES = { phone: ["w-phone-ts"], laptop: ["w-laptop-ts"], watch: ["w-watch"], ts: ["w-phone-ts", "w-laptop-ts", "w-ts-api", "w-ts-db"], api: ["w-ts-api", "w-api-db"], db: ["w-api-db", "w-ts-db", "w-db-bk"], backup: ["w-db-bk"], mcp: ["w-mcp"] };

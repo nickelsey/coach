@@ -13,3 +13,6 @@ deploy/dist/
 
 # Secrets
 *.key
+
+# Local-only notes: the specs and design previews
+docs/local/
