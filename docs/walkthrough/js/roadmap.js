@@ -48,6 +48,7 @@
         "Public-repo guardrails, so workflows and secrets are safe with the code in the open.",
       ],
       impl: [
+        ["Status", `<p>Started. <code>CLAUDE.md</code> and <code>AGENTS.md</code> are in the repo, and the server workflow from phase 3 already covers the Go tests and the image build. Still to do: the iOS and docs-freshness checks, contract tests, dependency update PRs, the issue template, and branch protection with the other repository settings.</p>`],
         ["What goes in CLAUDE.md", h.list([
           "Repo map and the commands to build, test and deploy each part.",
           "Invariants: timestamps are integer milliseconds; edits bump <code>updated_at</code> strictly; the server rejects unknown fields, so deploy the server before the app; migrations are forward-only and backward-compatible; never build images on the NAS.",
