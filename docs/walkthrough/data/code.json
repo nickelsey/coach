@@ -92,7 +92,8 @@
    "title": "CI checks",
    "blurb": "Workflows that guard every pull request and push to main. The server's tests live in its delivery workflow, under Deploy.",
    "files": [
-    ".github/workflows/docs.yml"
+    ".github/workflows/docs.yml",
+    ".github/workflows/ios.yml"
    ]
   }
  ],
@@ -2433,6 +2434,59 @@
     }
    ],
    "source": "# Keeps the walkthrough honest: the Code page is generated from the sources, so\n# this fails when data/code.json is stale or a tracked source file isn't listed\n# in the generator. It also checks that the site's scripts parse.\n#\n# No path filter: any source change can make the generated file stale.\nname: docs\n\non:\n  pull_request:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:\n  freshness:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - name: Generated code docs are current\n        run: python3 docs/walkthrough/gen_code_docs.py --check\n      - name: Walkthrough scripts parse\n        run: |\n          for f in docs/walkthrough/js/*.js; do\n            node --check \"$f\"\n          done\n"
+  },
+  {
+   "path": ".github/workflows/ios.yml",
+   "group": "ci",
+   "lang": "yaml",
+   "lines": 56,
+   "note": "Builds the app and runs its tests on an iPhone simulator, on GitHub's Xcode 27 runner.",
+   "summary": "Builds the iPhone app and runs its tests on a simulator.\n\nThe app targets iOS 27, so this needs Xcode 27. GitHub's Xcode 27 runner is\nstill a public preview: keep this check out of main's required checks until\nit is generally available, so a runner problem can't block a merge.\n\nThe Xcode project is committed, so there is no XcodeGen step; this tests the\nsame project Xcode Cloud will build. No signing and no secrets are involved.",
+   "symbols": [
+    {
+     "kind": "key",
+     "name": "name",
+     "line": 9,
+     "depth": 0,
+     "doc": "Builds the iPhone app and runs its tests on a simulator.\n\nThe app targets iOS 27, so this needs Xcode 27. GitHub's Xcode 27 runner is\nstill a public preview: keep this check out of main's required checks until\nit is generally available, so a runner problem can't block a merge.\n\nThe Xcode project is committed, so there is no XcodeGen step; this tests the\nsame project Xcode Cloud will build. No signing and no secrets are involved."
+    },
+    {
+     "kind": "key",
+     "name": "on",
+     "line": 11,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "permissions",
+     "line": 19,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "concurrency",
+     "line": 22,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "env",
+     "line": 26,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "jobs",
+     "line": 30,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "# Builds the iPhone app and runs its tests on a simulator.\n#\n# The app targets iOS 27, so this needs Xcode 27. GitHub's Xcode 27 runner is\n# still a public preview: keep this check out of main's required checks until\n# it is generally available, so a runner problem can't block a merge.\n#\n# The Xcode project is committed, so there is no XcodeGen step; this tests the\n# same project Xcode Cloud will build. No signing and no secrets are involved.\nname: ios\n\non:\n  pull_request:\n    paths: [\"ios/**\", \".github/workflows/ios.yml\"]\n  push:\n    branches: [main]\n    paths: [\"ios/**\", \".github/workflows/ios.yml\"]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\nconcurrency:\n  group: ios-${{ github.ref }}\n  cancel-in-progress: true\n\nenv:\n  XCODE: /Applications/Xcode_27.2.app\n  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2\n\njobs:\n  test:\n    runs-on: xcode-27\n    timeout-minutes: 30\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - name: Select Xcode\n        run: |\n          sudo xcode-select -s \"$XCODE\"\n          xcodebuild -version\n      - name: Build and test\n        working-directory: ios\n        run: |\n          set -o pipefail\n          xcodebuild test -project Coach.xcodeproj -scheme Coach \\\n            -destination \"$DESTINATION\" \\\n            -resultBundlePath \"$RUNNER_TEMP/Coach.xcresult\" \\\n            CODE_SIGNING_ALLOWED=NO | xcbeautify --renderer github-actions\n      - name: Keep the test results on failure\n        if: failure()\n        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2\n        with:\n          name: Coach.xcresult\n          path: ${{ runner.temp }}/Coach.xcresult\n          retention-days: 7\n"
   }
  ],
  "linesByLang": {
@@ -2440,7 +2494,7 @@
   "sql": 48,
   "dockerfile": 16,
   "go-mod": 13,
-  "yaml": 296,
+  "yaml": 352,
   "json": 13,
   "bash": 272,
   "markdown": 352,

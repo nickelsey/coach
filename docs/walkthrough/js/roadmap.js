@@ -48,7 +48,7 @@
         "Public-repo guardrails, so workflows and secrets are safe with the code in the open.",
       ],
       impl: [
-        ["Status", `<p>Started. <code>CLAUDE.md</code> and <code>AGENTS.md</code> are in the repo, and the server workflow from phase 3 already covers the Go tests and the image build. Still to do: the iOS and docs-freshness checks, contract tests, dependency update PRs, the issue template, and branch protection with the other repository settings.</p>`],
+        ["Status", `<p>Started. <code>CLAUDE.md</code> and <code>AGENTS.md</code> are in the repo, and the server workflow from phase 3 already covers the Go tests and the image build. The docs-freshness and iOS checks are added as <code>docs.yml</code> and <code>ios.yml</code>. Still to do: contract tests, dependency update PRs, the issue template, and branch protection with the other repository settings.</p>`],
         ["What goes in CLAUDE.md", h.list([
           "Repo map and the commands to build, test and deploy each part.",
           "Invariants: timestamps are integer milliseconds; edits bump <code>updated_at</code> strictly; the server rejects unknown fields, so deploy the server before the app; migrations are forward-only and backward-compatible; never build images on the NAS.",
@@ -74,10 +74,10 @@ jobs:
         working-directory: server
         env:
           COACH_TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/postgres?sslmode=disable`)],
-        ["iOS CI", `<p>Runs on GitHub-hosted macOS runners, free because the repo is public (see <a href="#decisions">Decisions › iOS delivery</a>). New Xcode versions can take time to reach those runners: if Xcode 27 isn't available yet, keep this check non-blocking until it is. The job itself is short:</p>` + code(`brew install xcodegen
-cd ios && xcodegen
+        ["iOS CI", `<p>Runs on GitHub-hosted macOS runners, free because the repo is public (see <a href="#decisions">Decisions › iOS delivery</a>). The app needs Xcode 27, which GitHub offers on the <code>xcode-27</code> runner as a public preview, so keep this check out of main's required checks until that runner is generally available. The Xcode project is committed, so the job needs no XcodeGen step:</p>` + code(`sudo xcode-select -s /Applications/Xcode_27.2.app
+cd ios
 xcodebuild test -project Coach.xcodeproj -scheme Coach \\
-  -destination 'platform=iOS Simulator,name=iPhone 17'`)],
+  -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.2' CODE_SIGNING_ALLOWED=NO`)],
         ["Public-repo guardrails", h.list([
           "PR workflows use <code>pull_request</code>, never <code>pull_request_target</code>, with <code>permissions: contents: read</code>. Forked PRs then run without secrets.",
           "Deploy credentials are environment secrets, and the <code>dev</code> and <code>prod</code> environments accept only <code>main</code>.",
@@ -88,7 +88,7 @@ xcodebuild test -project Coach.xcodeproj -scheme Coach \\
           "CI logs are public, so workflows print no hostnames or tokens. Test fixtures are synthetic: no real rides or health data in the repo.",
         ])],
         ["Contract tests", `<p>A <code>contracts/fixtures/</code> folder of JSON bodies. A Swift test encodes known records and compares them with the fixtures; a Go test decodes every fixture with unknown fields disallowed. Schema drift between app and server then fails CI instead of failing a push from your phone.</p>`],
-        ["Docs freshness", `<p>CI runs <code>gen_code_docs.py</code> and fails if <code>data/code.json</code> changes, so the Code page never silently lags the source.</p>`],
+        ["Docs freshness", `<p>CI runs <code>gen_code_docs.py --check</code>, which fails if <code>data/code.json</code> is stale or a tracked source file is missing from the generator, so the Code page never silently lags the source.</p>`],
         ["Dependency updates", `<p>Dependabot for Go modules, GitHub Actions and Docker base images; or Renovate, which also understands Swift packages. Pair with phase 1's pinning.</p>`],
         ["Agent-sized issues", `<p>An issue template with: goal, links to the relevant walkthrough pages, acceptance criteria, and the tests that prove it. Label <code>agent-ok</code> for tasks an agent may take end to end. The roadmap phases below break into these.</p>`],
       ],

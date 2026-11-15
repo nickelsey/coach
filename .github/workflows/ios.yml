@@ -1,0 +1,56 @@
+# Builds the iPhone app and runs its tests on a simulator.
+#
+# The app targets iOS 27, so this needs Xcode 27. GitHub's Xcode 27 runner is
+# still a public preview: keep this check out of main's required checks until
+# it is generally available, so a runner problem can't block a merge.
+#
+# The Xcode project is committed, so there is no XcodeGen step; this tests the
+# same project Xcode Cloud will build. No signing and no secrets are involved.
+name: ios
+
+on:
+  pull_request:
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  push:
+    branches: [main]
+    paths: ["ios/**", ".github/workflows/ios.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XCODE: /Applications/Xcode_27.2.app
+  DESTINATION: platform=iOS Simulator,name=iPhone 17,OS=27.2
+
+jobs:
+  test:
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - name: Build and test
+        working-directory: ios
+        run: |
+          set -o pipefail
+          xcodebuild test -project Coach.xcodeproj -scheme Coach \
+            -destination "$DESTINATION" \
+            -resultBundlePath "$RUNNER_TEMP/Coach.xcresult" \
+            CODE_SIGNING_ALLOWED=NO | xcbeautify --renderer github-actions
+      - name: Keep the test results on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Coach.xcresult
+          path: ${{ runner.temp }}/Coach.xcresult
+          retention-days: 7

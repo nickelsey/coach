@@ -16,7 +16,7 @@ as `coach.<tailnet>.ts.net`, and synthetic data in tests and fixtures.
 | `ios/` | SwiftUI app, iOS 27+, Swift 6. `Coach/App`, `Data` (GRDB), `Sync`, `Theme` (NEON//OS design system), `Features`; tests in `CoachTests`. |
 | `deploy/` | One Compose file for dev and prod, the deploy, backup and restore-check scripts, SQL, and the Tailscale policy template. `deploy/README.md` is the operations guide. |
 | `docs/walkthrough/` | Static site: architecture, sync, code docs, runbook, roadmap and decisions. |
-| `.github/workflows/` | CI. `server.yml` tests, builds the image and deploys. |
+| `.github/workflows/` | CI. `server.yml` tests, builds the image and deploys; `ios.yml` runs the app's tests on a simulator; `docs.yml` checks the generated code docs. |
 
 The plan lives in `docs/walkthrough/js/roadmap.js` (ordered phases, with a
 status note where work has started) and `docs/walkthrough/js/decisions.js`.

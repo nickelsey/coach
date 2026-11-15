@@ -89,6 +89,7 @@ GROUPS = [
     ]),
     ("ci", "CI checks", "Workflows that guard every pull request and push to main. The server's tests live in its delivery workflow, under Deploy.", [
         (".github/workflows/docs.yml", "Fails when data/code.json is stale or a tracked source file is missing from this generator."),
+        (".github/workflows/ios.yml", "Builds the app and runs its tests on an iPhone simulator, on GitHub's Xcode 27 runner."),
     ]),
 ]
 
