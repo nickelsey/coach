@@ -9,6 +9,11 @@ the full source. Run it after changing code:
 
 It warns about tracked source files that aren't listed, so new files don't
 silently go missing from the docs. Secrets (.env) are never read.
+
+CI runs it with --check, which writes nothing and fails if data/code.json is
+out of date or a tracked source file isn't listed:
+
+    python3 docs/walkthrough/gen_code_docs.py --check
 """
 
 from __future__ import annotations
@@ -81,6 +86,9 @@ GROUPS = [
         ("ios/CoachTests/WireFormatTests.swift", "Timestamp parsing from Go and exact millisecond round trips."),
         ("ios/project.yml", "XcodeGen spec. Edit this, not the .xcodeproj."),
         ("ios/README.md", "Build, test and run instructions."),
+    ]),
+    ("ci", "CI checks", "Workflows that guard every pull request and push to main. The server's tests live in its delivery workflow, under Deploy.", [
+        (".github/workflows/docs.yml", "Fails when data/code.json is stale or a tracked source file is missing from this generator."),
     ]),
 ]
 
@@ -243,6 +251,10 @@ def tracked_files() -> set[str]:
 
 
 def main() -> int:
+    check = sys.argv[1:] == ["--check"]
+    if sys.argv[1:] and not check:
+        print("usage: gen_code_docs.py [--check]", file=sys.stderr)
+        return 2
     files, groups, listed = [], [], set()
     for gid, title, blurb, entries in GROUPS:
         ids = []
@@ -273,8 +285,21 @@ def main() -> int:
     for f in files:
         by_lang[f["lang"]] = by_lang.get(f["lang"], 0) + f["lines"]
 
+    out = json.dumps({"groups": groups, "files": files, "linesByLang": by_lang, "unlisted": unlisted}, indent=1)
+    if check:
+        ok = True
+        if unlisted:
+            print("error: add the files above to GROUPS in gen_code_docs.py", file=sys.stderr)
+            ok = False
+        if not OUT.exists() or OUT.read_text(encoding="utf-8") != out:
+            print(f"error: {OUT.relative_to(ROOT)} is out of date; run python3 docs/walkthrough/gen_code_docs.py and commit the result",
+                  file=sys.stderr)
+            ok = False
+        if ok:
+            print(f"{OUT.relative_to(ROOT)} is up to date")
+        return 0 if ok else 1
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps({"groups": groups, "files": files, "linesByLang": by_lang, "unlisted": unlisted}, indent=1))
+    OUT.write_text(out, encoding="utf-8")
     print(f"wrote {OUT.relative_to(ROOT)}: {len(files)} files, {sum(len(f['symbols']) for f in files)} symbols")
     return 0
 

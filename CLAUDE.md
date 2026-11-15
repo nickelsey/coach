@@ -62,6 +62,7 @@ Deploy scripts and docs:
 ```sh
 shellcheck deploy/*.sh deploy/nas/coach-deploy
 python3 docs/walkthrough/gen_code_docs.py    # refresh data/code.json
+python3 docs/walkthrough/gen_code_docs.py --check   # what CI runs; writes nothing
 cd docs/walkthrough && python3 -m http.server # view the site locally
 ```
 

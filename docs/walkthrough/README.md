@@ -17,4 +17,6 @@ cd docs/walkthrough && python3 -m http.server   # then open http://localhost:800
   extracts doc comments and declarations, and writes `data/code.json`. It warns
   about tracked source files missing from `GROUPS`.
 
-Run the generator whenever sources change, so the Code page doesn't drift.
+Run the generator whenever sources change, so the Code page doesn't drift. CI runs it
+with `--check` and fails if `data/code.json` is stale or a tracked source file
+isn't in `GROUPS`.

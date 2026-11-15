@@ -1,0 +1,30 @@
+# Keeps the walkthrough honest: the Code page is generated from the sources, so
+# this fails when data/code.json is stale or a tracked source file isn't listed
+# in the generator. It also checks that the site's scripts parse.
+#
+# No path filter: any source change can make the generated file stale.
+name: docs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  freshness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Generated code docs are current
+        run: python3 docs/walkthrough/gen_code_docs.py --check
+      - name: Walkthrough scripts parse
+        run: |
+          for f in docs/walkthrough/js/*.js; do
+            node --check "$f"
+          done

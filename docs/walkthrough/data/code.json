@@ -86,6 +86,14 @@
     "ios/project.yml",
     "ios/README.md"
    ]
+  },
+  {
+   "id": "ci",
+   "title": "CI checks",
+   "blurb": "Workflows that guard every pull request and push to main. The server's tests live in its delivery workflow, under Deploy.",
+   "files": [
+    ".github/workflows/docs.yml"
+   ]
   }
  ],
  "files": [
@@ -2386,6 +2394,45 @@
     }
    ],
    "source": "# Coach iOS app\n\nSwiftUI, iOS 27+. The Xcode project is generated from `project.yml`; don't edit\n`Coach.xcodeproj` by hand.\n\n```sh\ncd ios\nxcodegen                     # after adding/removing files or changing project.yml\nopen Coach.xcodeproj\nxcodebuild test -project Coach.xcodeproj -scheme Coach \\\n  -destination 'platform=iOS Simulator,name=iPhone 17'\n```\n\n## Layout\n\n- `Coach/Theme`: NEON//OS design system (colors, fonts, chamfer shapes, panels,\n  segmented bars, buttons, grid and scanlines).\n- `Coach/Data`: GRDB database. Timestamps are stored as integer milliseconds so\n  they round-trip exactly; sync's last-writer-wins depends on that.\n- `Coach/Sync`: push queued changes, then pull past the cursor. Same conflict\n  rule as the server.\n- `Coach/Features`: screens.\n\n## Connecting to the server\n\nSettings (gear on Today) > UPLINK: enter `https://coach.<tailnet>.ts.net` and\nthe `COACH_API_TOKEN` from `deploy/.env`, then TEST LINK. The token is kept in\nthe Keychain. The simulator uses the Mac's network, so it reaches the server\nwhenever the Mac is on the tailnet.\n\n## Running on your iPhone\n\nSet `DEVELOPMENT_TEAM` in `project.yml` (and change the `dev.coach.*` bundle IDs\nif you like), run `xcodegen`, then build to the device from Xcode.\n"
+  },
+  {
+   "path": ".github/workflows/docs.yml",
+   "group": "ci",
+   "lang": "yaml",
+   "lines": 30,
+   "note": "Fails when data/code.json is stale or a tracked source file is missing from this generator.",
+   "summary": "Keeps the walkthrough honest: the Code page is generated from the sources, so\nthis fails when data/code.json is stale or a tracked source file isn't listed\nin the generator. It also checks that the site's scripts parse.\n\nNo path filter: any source change can make the generated file stale.",
+   "symbols": [
+    {
+     "kind": "key",
+     "name": "name",
+     "line": 6,
+     "depth": 0,
+     "doc": "Keeps the walkthrough honest: the Code page is generated from the sources, so\nthis fails when data/code.json is stale or a tracked source file isn't listed\nin the generator. It also checks that the site's scripts parse.\n\nNo path filter: any source change can make the generated file stale."
+    },
+    {
+     "kind": "key",
+     "name": "on",
+     "line": 8,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "permissions",
+     "line": 14,
+     "depth": 0,
+     "doc": ""
+    },
+    {
+     "kind": "key",
+     "name": "jobs",
+     "line": 17,
+     "depth": 0,
+     "doc": ""
+    }
+   ],
+   "source": "# Keeps the walkthrough honest: the Code page is generated from the sources, so\n# this fails when data/code.json is stale or a tracked source file isn't listed\n# in the generator. It also checks that the site's scripts parse.\n#\n# No path filter: any source change can make the generated file stale.\nname: docs\n\non:\n  pull_request:\n  push:\n    branches: [main]\n  workflow_dispatch:\n\npermissions:\n  contents: read\n\njobs:\n  freshness:\n    runs-on: ubuntu-24.04\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - name: Generated code docs are current\n        run: python3 docs/walkthrough/gen_code_docs.py --check\n      - name: Walkthrough scripts parse\n        run: |\n          for f in docs/walkthrough/js/*.js; do\n            node --check \"$f\"\n          done\n"
   }
  ],
  "linesByLang": {
@@ -2393,7 +2440,7 @@
   "sql": 48,
   "dockerfile": 16,
   "go-mod": 13,
-  "yaml": 266,
+  "yaml": 296,
   "json": 13,
   "bash": 272,
   "markdown": 352,
